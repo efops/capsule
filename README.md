@@ -2,6 +2,8 @@
 
 A runtime that runs nothing unless it is sealed, trusted and allowed.
 
+<a href="https://www.buymeacoffee.com/efkanisazade"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="40"></a>
+
 A capsule is a plain directory: a manifest, a root filesystem and a signature
 over both. `capsule run` checks the signature against keys the host trusts,
 checks the conditions sealed into the manifest, and only then starts the
@@ -647,12 +649,6 @@ guide's commands in order, `test/examples.sh` builds and runs the examples,
 servers (it downloads them). `test/mesh.sh`
 covers the mesh. `test/e2e.sh` builds a capsule from an Alpine rootfs and runs
 it as a systemd service.
-
-## Support
-
-If capsule is useful to you, you can support its development:
-
-<a href="https://www.buymeacoffee.com/efkanisazade"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="48"></a>
 
 ## License
 
