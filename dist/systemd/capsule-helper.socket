@@ -1,0 +1,14 @@
+# Where a capsule run without root asks for the few things only root may do.
+# Only members of the "capsule" group can connect.
+[Unit]
+Description=Capsule helper for users without root
+
+[Socket]
+ListenStream=/run/capsule-helper.sock
+SocketGroup=capsule
+SocketMode=0660
+Accept=yes
+MaxConnections=256
+
+[Install]
+WantedBy=sockets.target

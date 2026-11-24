@@ -1,0 +1,16 @@
+# One helper per request, started by capsule-helper.socket and gone when the
+# request is. It must stay in the host's own mount namespace, since the
+# volumes it mounts are for a capsule outside it.
+[Unit]
+Description=Capsule helper (one request)
+CollectMode=inactive-or-failed
+
+[Service]
+ExecStart=/usr/local/bin/capsule __helper
+StandardInput=null
+StandardOutput=journal
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes

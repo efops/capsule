@@ -1,0 +1,12 @@
+# Ubuntu 24.04 and later only let programs with an AppArmor profile use
+# capabilities inside a user namespace, which running without root needs.
+# Install capsule at /usr/local/bin/capsule, then:
+#   sudo cp dist/apparmor/capsule /etc/apparmor.d/capsule
+#   sudo apparmor_parser -r /etc/apparmor.d/capsule
+abi <abi/4.0>,
+include <tunables/global>
+
+profile capsule /usr/local/bin/capsule flags=(unconfined) {
+  userns,
+  include if exists <local/capsule>
+}

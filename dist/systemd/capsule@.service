@@ -1,0 +1,22 @@
+# Runs /var/lib/capsule/apps/<name> as a service, restarted if it fails.
+#   sudo systemctl enable --now capsule@<name>
+# Extra `capsule run` flags go in /etc/capsule/apps/<name>.env, for example:
+#   CAPSULE_ARGS=-publish 8080:8080
+[Unit]
+Description=Capsule %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=-/etc/capsule/apps/%i.env
+# Pick up the current release first, if this host has a ledger that holds one.
+ExecStartPre=-/usr/local/bin/capsule fetch %i
+ExecStart=/usr/local/bin/capsule run $CAPSULE_ARGS /var/lib/capsule/apps/%i
+Restart=on-failure
+RestartSec=2
+# Signal the supervisor only: it stops the capsule's cgroup and cleans up.
+KillMode=process
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

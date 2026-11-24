@@ -1,0 +1,13 @@
+# Makes this host obey signed orders:  systemctl enable --now capsule-orders.timer
+# (for capsules run without root:      systemctl --user enable --now capsule-orders.timer,
+#  with `loginctl enable-linger <user>` so it runs while the user is logged out)
+[Unit]
+Description=Look for capsule orders every few seconds
+
+[Timer]
+OnBootSec=10s
+OnUnitInactiveSec=5s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

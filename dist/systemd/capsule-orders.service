@@ -1,0 +1,13 @@
+# One look in the fleet ledger for orders addressed to this host; carries out
+# those signed by the operators in operators.d and exits. Started by
+# capsule-orders.timer. Nothing listens and nothing stays running.
+[Unit]
+Description=Carry out capsule orders waiting for this host
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/capsule orders
+# Keep the journal for what capsule says, not a line for every quiet look.
+SyslogLevel=notice
+LogLevelMax=notice
