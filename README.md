@@ -648,6 +648,12 @@ servers (it downloads them). `test/mesh.sh`
 covers the mesh. `test/e2e.sh` builds a capsule from an Alpine rootfs and runs
 it as a systemd service.
 
+## Support
+
+If capsule is useful to you, you can support its development:
+
+<a href="https://www.buymeacoffee.com/efkanisazade"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="48"></a>
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
