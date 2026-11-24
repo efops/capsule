@@ -647,3 +647,7 @@ guide's commands in order, `test/examples.sh` builds and runs the examples,
 servers (it downloads them). `test/mesh.sh`
 covers the mesh. `test/e2e.sh` builds a capsule from an Alpine rootfs and runs
 it as a systemd service.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
