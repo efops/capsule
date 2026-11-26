@@ -36,6 +36,7 @@ for the manifest's fields, see section 13 there.
 | [`render`](#render) | [`version`](#version) | [`witness`](#witness) |
 | | | [`grant`](#grant), [`tick`](#tick) |
 | | | [`order`](#order), [`orders`](#orders) |
+| | | [`tissue`](#tissue), [`tend`](#tend) |
 
 ## Making capsules
 
@@ -539,6 +540,44 @@ answer to each, and exits. `capsule-orders.timer` runs it every 5 seconds.
 `/etc/capsule/orders` sets how many operators must sign each action, one
 `<action> <number>` or `<action> off` per line, `*` for the rest; `exec` is
 off unless listed.
+
+### tissue
+
+```
+capsule tissue -key <file> [-o <file>] <tissue.json>
+capsule tissue sign -key <file> <signed file>
+capsule tissue send <signed file>
+capsule tissue status
+```
+
+Signs a tissue (which cells must be alive, how many, on which hosts) and
+publishes it to the ledger. `-o` writes the signed file instead, for another
+operator to `sign` before it is sent. `status` shows every host and every
+slot: who holds it, at which term, on which release, and the beacon round of
+the draw that decided it (`?` marks a draw made without the beacon).
+
+The file:
+
+| Field | Meaning |
+|---|---|
+| `name` | The tissue's name |
+| `lease` | Ticks a renewal lasts (default 10) |
+| `budget` | `memory`, `cpus`: the most the whole tissue may commit |
+| `cells.<name>` | `root`, `min`, `max`, `on`, `standby` (`warm`, `hot`), `takeover` (`fast`, `strict`), `step` |
+| `hosts[]` | `file` (from `capsule host -export`), `labels`, `weight`, `memory`, `cpus`, `cores`, `nics` |
+
+### tend
+
+```
+capsule tend
+```
+
+On a host: one pass over the tissue. Says the host is alive, reads the
+leases, and does this host's part: claims a slot it has won, renews the ones
+it holds, keeps a standby ready, moves to a new release when it is its turn,
+and stops what it no longer holds. `capsule-orders.timer` runs it every 5
+seconds after `capsule orders`. It does nothing on a host with no operators,
+no ledger or no tissue.
 
 ## Environment variables
 

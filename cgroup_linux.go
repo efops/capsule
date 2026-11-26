@@ -189,7 +189,7 @@ func applyLimits(cg string, l Limits) error {
 
 // enableControllers turns on what it can; a missing one surfaces when its limit is set.
 func enableControllers(cg string) {
-	for _, c := range []string{"+cpu", "+memory", "+pids"} {
+	for _, c := range []string{"+cpu", "+memory", "+pids", "+cpuset"} {
 		os.WriteFile(filepath.Join(cg, "cgroup.subtree_control"), []byte(c), 0)
 	}
 }
@@ -235,7 +235,7 @@ func running() map[string]instance {
 			removeCgroup(cg)
 			releaseTunnel(base + ".netns")
 			removeTree(base + ".cell")
-			for _, suffix := range []string{".cg", ".rootfs", ".lock", ".label", ".manifest", ""} {
+			for _, suffix := range []string{".cg", ".rootfs", ".lock", ".label", ".manifest", ".cores", ""} {
 				os.Remove(base + suffix)
 			}
 			continue

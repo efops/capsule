@@ -61,6 +61,13 @@ func initCapsule() error {
 		return err
 	}
 
+	if m.Latency != nil && m.Latency.MemoryLock {
+		// The program has no capabilities, so this limit is what lets it pin its memory.
+		unlimited := unix.Rlimit{Cur: unix.RLIM_INFINITY, Max: unix.RLIM_INFINITY}
+		if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &unlimited); err != nil {
+			return fmt.Errorf("latency: memory_lock needs root: %w", err)
+		}
+	}
 	if err := dropPrivileges(m.Syscalls, m.socketsOnly()); err != nil {
 		return err
 	}
@@ -228,6 +235,14 @@ func buildRoot(spec initSpec) error {
 	for link, target := range map[string]string{"fd": "/proc/self/fd", "stdin": "/proc/self/fd/0", "stdout": "/proc/self/fd/1", "stderr": "/proc/self/fd/2"} {
 		if err := os.Symlink(target, dev+"/"+link); err != nil {
 			return err
+		}
+	}
+	if l := spec.Manifest.Latency; l != nil && l.Hugepages {
+		if err := os.Mkdir(dev+"/hugepages", 0o755); err != nil {
+			return err
+		}
+		if err := mount("hugetlbfs", dev+"/hugepages", "hugetlbfs", unix.MS_NOSUID|unix.MS_NODEV, ""); err != nil {
+			return fmt.Errorf("latency: hugepages (needs root, and huge pages set aside on the host): %w", err)
 		}
 	}
 	tmp, err := at("tmp")

@@ -94,6 +94,16 @@ const cueSchema = `
 		cpus?:   number & >0
 		pids?:   int & >0
 	}
+	latency?: {
+		cores?:       int & >0
+		memory_lock?: bool
+		hugepages?:   bool
+		nic?: {
+			name:     string
+			address?: string
+			gateway?: string
+		}
+	}
 }
 
 #File: {

@@ -230,6 +230,7 @@ func loadOrderRules() (orderRules, error) {
 		r.need[action] = 1
 	}
 	r.need["exec"] = 0
+	r.need["tissue"] = 1 // not an order: how many operators must sign the tissue this host follows
 	raw, err := os.ReadFile(filepath.Join(configDir(), "orders"))
 	if os.IsNotExist(err) {
 		return r, nil
@@ -248,6 +249,7 @@ func loadOrderRules() (orderRules, error) {
 			n, err = 0, nil
 		}
 		_, known := orderActions[f[0]]
+		known = known || f[0] == "tissue"
 		if len(f) != 2 || err != nil || n < 0 || (!known && f[0] != "*") {
 			return r, fmt.Errorf("%s line %d: want `<action> <signatures needed>` or `<action> off`", filepath.Join(configDir(), "orders"), i+1)
 		}
@@ -266,18 +268,26 @@ func loadOrderRules() (orderRules, error) {
 
 // permits reports whether enough of this host's operators signed the order.
 func (r orderRules) permits(o order) error {
-	need := r.need[o.Action]
-	if need == 0 {
+	if r.need[o.Action] == 0 {
 		return fmt.Errorf("this host does not take %s orders", o.Action)
 	}
-	msg, seen := o.message(), map[string]bool{}
-	for _, s := range o.Signatures {
+	return r.signedByEnough(o.Action, o.message(), o.Signatures)
+}
+
+// signedByEnough counts the distinct operators of this host with a valid signature over msg.
+func (r orderRules) signedByEnough(what string, msg []byte, sigs []orderSig) error {
+	need := r.need[what]
+	if need == 0 {
+		return fmt.Errorf("%s is turned off on this host", what)
+	}
+	seen := map[string]bool{}
+	for _, s := range sigs {
 		if id := keyID(s.Signer); r.operators[id] && !seen[id] && verifySig(s.Signer, s.Signature, msg) {
 			seen[id] = true
 		}
 	}
 	if len(seen) < need {
-		return fmt.Errorf("signed by %d of this host's operators; %s needs %d", len(seen), o.Action, need)
+		return fmt.Errorf("signed by %d of this host's operators; %s needs %d", len(seen), what, need)
 	}
 	return nil
 }

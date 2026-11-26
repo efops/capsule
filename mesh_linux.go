@@ -1133,6 +1133,11 @@ func (ms *mesh) applyPolicy() error {
 				}
 			}
 			targets = append(targets, target{ip6(ip6Dst, serviceAddr(p.Name)), 0})
+			if len(live) == 0 {
+				// The peer has no instance yet. There is nowhere to send, and
+				// nothing is allowed out; the rules are rebuilt when one appears.
+				targets = nil
+			}
 			for _, t := range targets {
 				var pick []expr.Any
 				one := func(addr net.IP) { pick = []expr.Any{&expr.Immediate{Register: reg, Data: addr}} }

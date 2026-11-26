@@ -649,6 +649,75 @@ machine's console for emergencies. There is no interactive terminal; `exec`
 runs one command and returns what it printed (up to 64 KB, one minute unless
 you pass `timeout=`).
 
+### The tissue: a fleet that looks after itself
+
+Orders tell one host to do one thing. A **tissue** tells the whole fleet what
+must be alive, and the hosts keep it true between them. There is no
+scheduler and no control plane to run: each host, on the timer that already
+pulls orders, reads the same facts from the ledger and does its own part.
+
+You write one file. Name the roots; what they need is found from their
+manifests.
+
+```json
+{
+  "name": "prod",
+  "cells": {
+    "web": {"root": true, "min": 2, "max": 4, "standby": "warm"}
+  },
+  "hosts": [
+    {"file": "web-1.host", "memory": "8G"},
+    {"file": "web-2.host", "memory": "8G"},
+    {"file": "web-3.host", "memory": "8G", "labels": ["ssd"]}
+  ]
+}
+```
+
+```sh
+capsule publish -key dev.key web          # and db, and whatever else web needs
+capsule tissue -key ops.key prod.json     # sign it and put it in the ledger
+capsule tissue status                     # what is alive, where, and why there
+```
+
+If `web` needs `db`, a `db` is grown without being listed. If nothing needs
+it any more, it is stopped.
+
+**How a host is chosen.** Every three seconds the public drand beacon
+publishes a number nobody could know beforehand. For each empty place, every
+host hashes that number with the place and its own id; the lowest wins. So
+every host works out the same winner without asking anyone, nobody can
+arrange for your capsule to land on a host they control, and `tissue status`
+shows the round that decided each placement, which anyone can check again.
+
+**How a place is kept.** The winner takes a lease in the ledger and renews
+it on every pass. If it stops renewing, the lease lapses and the next host
+in the draw takes the place with a higher term. A host that finds a higher
+term than its own stops its copy.
+
+| Setting | Meaning |
+|---|---|
+| `root` | Alive whether or not anything needs it |
+| `min`, `max` | Instances, each on its own host. It grows towards `max` while every instance is busy and shrinks back when all are idle. A cell you do not list gets exactly one |
+| `on` | Labels a host must carry |
+| `standby` | `warm`: the runner-up keeps the capsule fetched and checked, and starts it the moment the lease lapses. `hot`: it runs there too |
+| `takeover` | `fast` (default): keep running if the ledger is out of reach. `strict`: stop as the lease runs out, so there are never two |
+| `step` | Instances replaced at a time when you publish a new release (default 1) |
+| `lease` (top level) | Ticks a renewal lasts. Default 10, half a minute |
+| `budget` (top level) | `memory` and `cpus` the whole tissue may commit |
+| hosts: `weight`, `memory`, `cpus` | Its share of draws, and what it offers. A host is never given more than it offers, worked out from the leases it holds and each capsule's sealed limits, not from what the host reports |
+
+**New releases roll out by themselves.** `capsule publish` a new version and
+the instances are replaced a few at a time, in an order the beacon picks. If
+a replaced instance does not stay up, the previous release is put back, and
+that release is held back on every host until you publish another.
+
+**What to expect.**
+
+- A host acts when its timer fires, every 5 seconds. Placement takes a few seconds; taking over from a dead host takes one lease plus one pass (about 35 seconds by default, 12 to 15 with `"lease": 4`).
+- For no gap at all, run two or more instances, or a `hot` standby: the mesh already sends callers only to instances that answer.
+- A cell with volumes only comes back on the host that has its data.
+- The tissue file needs an operator's signature, like an order; `/etc/capsule/orders` can require several with a `tissue 2` line.
+
 ## 10. Building from a file
 
 Instead of making folders by hand, describe a capsule in a
@@ -801,8 +870,35 @@ it all come from that file.
 | `scale` | `min`, `max`, `cpu`, `memory_max`, `cooldown`, `restart`, `balance`, `fleet` |
 | `unlock` | Environment variables that switch on at a set time: `at` and `env` |
 | `syscalls` | A list that narrows which kernel calls are allowed |
+| `latency` | For programs where microseconds matter: `cores`, `memory_lock`, `hugepages`, `nic` (see below) |
 
 An unknown field is an error, so a typo cannot silently turn a setting off.
+
+**The latency profile.** For a program that measures itself in microseconds,
+capsule can step out of its way once it has started. All of it needs root.
+
+```json
+"latency": {
+  "cores": 2,
+  "memory_lock": true,
+  "hugepages": true,
+  "nic": {"name": "eth1", "address": "10.0.0.5/24", "gateway": "10.0.0.1"}
+}
+```
+
+| Field | What the capsule gets |
+|---|---|
+| `cores` | That many whole cores from the set in `/etc/capsule/latency`, shared with no other capsule and with no CPU quota to pause it. Memory comes from the same NUMA node. Cannot be combined with `limits.cpus` |
+| `memory_lock` | The right to lock all its memory in RAM (`mlockall`) |
+| `hugepages` | The host's huge pages, at `/dev/hugepages` |
+| `nic` | One of the host's network interfaces, moved into the capsule and set up there. The host does not have it while the capsule runs |
+
+In a tissue, such a cell is only placed on hosts that list the cores and the
+interface: `{"file": "fast-1.host", "cores": 6, "nics": ["eth1"]}`.
+
+This is about removing what would slow a program down, and it is tested for
+being applied, not for speed: real numbers need your own hardware. Stacks
+that bypass the kernel entirely (DPDK, OpenOnload) are not supported yet.
 
 ## 14. Commands
 
@@ -853,6 +949,9 @@ An unknown field is an error, so a typo cannot silently turn a setting off.
 | `capsule order -key <key> -host <host file>... <action>` | Sign an order and send it to hosts through the ledger |
 | `capsule order sign`, `send`, `result` | Add a signature to an order file, send it, read the answers |
 | `capsule orders` | On a host: carry out the orders waiting for it (run by `capsule-orders.timer`) |
+| `capsule tissue -key <key> <file>` | Sign a tissue and publish it: what the fleet must keep alive |
+| `capsule tissue status` | What is alive, where, and which draw put it there |
+| `capsule tend` | On a host: do its part of the tissue (run by the same timer) |
 
 ## 15. Where things live
 
@@ -865,6 +964,7 @@ An unknown field is an error, so a typo cannot silently turn a setting off.
 | `/etc/capsule/delegation` | Names this host may issue cards for |
 | `/etc/capsule/operators.d/*.pub` | Keys whose orders this host obeys |
 | `/etc/capsule/orders` | How many operators must sign each kind of order |
+| `/etc/capsule/latency` | Cores this host keeps for latency-critical capsules |
 | `/etc/capsule/policy.d/*.cue` | Rules every capsule here must satisfy |
 | `/etc/capsule/ledger`, `ledger.env` | The shared store and its credentials |
 | `/etc/capsule/recovery.d/*.host` | Hosts that can also open new encrypted volumes |
@@ -911,7 +1011,8 @@ add `scale.memory_max`.
 - **Orders do not maintain the host itself.** There is no remote shell on a host, by design; operating system updates need their own mechanism. `exec` runs one command inside a capsule, not an interactive terminal.
 - **Some cell traffic passes through capsule's own process:** socket files, programs that listen on IPv4 only, and offers with a grant or `proxy_protocol`. Port-to-port traffic otherwise goes straight through the kernel.
 - **Autoscaling goes by CPU and memory**, not by request rate or queue length.
-- **It does not place capsules on hosts for you.** You choose which hosts run what; `fetch` installs them and `fleet` scaling shares the load among hosts that have them.
+- **A tissue is not instant.** Hosts act on a timer, so placement takes seconds and taking over from a dead host takes about a lease. Use several instances or a hot standby where a gap matters.
+- **A cell with data stays on its host.** The tissue does not move volumes.
 - **`expires` trusts the host's clock.** `not_before` can be made tamper-proof with `timelock`; `expires` cannot.
 - **Time locks are not post-quantum.** Seals, approvals, encrypted capsules and, with `kem` keys on the cards, mesh and cell traffic are.
 

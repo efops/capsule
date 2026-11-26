@@ -21,3 +21,4 @@ func cmdIdentity([]string) error { return errLinuxOnly }
 func carryOut(order, time.Duration) (string, error) { return "", errLinuxOnly }
 func enterCapsule() error                           { return errLinuxOnly }
 func cmdHelper() error                              { return errLinuxOnly }
+func cmdTend([]string) error                        { return errLinuxOnly }
