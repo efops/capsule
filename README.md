@@ -453,6 +453,48 @@ the manifest.
 
 `failover` suits a single-writer service such as a primary database.
 
+## Orchestration: the tissue
+
+A tissue keeps a set of cells alive across a fleet with no scheduler, no
+control plane and no leader. An operator signs one file naming the roots,
+how many of each may live and which hosts may carry them. Each host then
+applies three rules by itself, from the same public facts, on the timer that
+already pulls orders (`capsule tend`):
+
+- **Need.** A cell lives because it is a root or because a living cell needs it; needs are read from the sealed manifests (`needs`, and mesh peers with `out` ports). What nothing needs is stopped. A cell that is only needed gets one instance: nothing grows past a number an operator signed.
+- **Draw.** A vacant slot goes to the host with the lowest `hash(beacon signature, slot, host id)`, scaled by the host's signed weight. The drand beacon's signature for a round cannot be known before it is published and is the same for everyone, so every host computes the same winner without talking to the others, placement cannot be steered towards a chosen host, and each lease records the round so the draw can be checked afterwards. Of the two best-placed hosts, the one that has committed less takes it.
+- **Lease.** A slot is a ledger key that can be created once per term, renewed by a signed pulse every pass. A lease that lapses is taken with the next term; a host that sees a higher term than its own stops its copy.
+
+```sh
+capsule tissue -key ops.key prod.json
+capsule tissue status
+```
+
+What follows from those:
+
+- **Failover.** A host that stops renewing loses its slots after one lease. With `standby: warm` the runner-up of the same draw already has the capsule fetched and verified and goes first; with `standby: hot` it is already running it.
+- **Split brain is a choice per cell.** `takeover: fast` keeps running when the ledger cannot be reached, because nothing can take its slot meanwhile either, but a host cut off alone may overlap with its replacement until it is back. `takeover: strict` stops the cell just before its lease runs out.
+- **Generations.** A new release is rolled out `step` instances at a time in an order fixed by the beacon round of its publication. An instance must stay up to count; if it does not, the previous release is put back, the host records a signed halt, and every host skips that release.
+- **Load.** Hosts are never asked how busy they are for placement: what a host has committed is the sum of the sealed limits of the leases it holds, compared with what the tissue says it offers. Growth between `min` and `max` follows the instances' own CPU use, one step per epoch, inside the tissue's `budget`.
+- **Trust.** The tissue needs operator signatures (`tissue 2` in `/etc/capsule/orders` for two). Every lease and pulse is signed by its host and checked against the host keys in the tissue, so a writer to the ledger can hide or delay facts but not invent them. A host never goes back to an older tissue.
+- **The beacon is not a dependency.** A round's signature proves itself, so one host that can reach drand shares it through the ledger. With no beacon at all hosts still agree, from a value derived from the round number, and such leases are marked unproven.
+
+### Latency profile
+
+`"latency"` in the manifest is for programs that measure themselves in
+microseconds. It only changes how the capsule is set up; after start nothing
+of capsule is on the program's path.
+
+| Field | Effect |
+|---|---|
+| `cores` | Whole cores from the host's reserved set (`/etc/capsule/latency`: `cores 2-7`), exclusive to the capsule, no CPU quota, memory from the cores' NUMA node. Ordinary capsules are confined to the other cores |
+| `memory_lock` | `RLIMIT_MEMLOCK` is lifted, so the program can `mlockall` |
+| `hugepages` | `hugetlbfs` mounted at `/dev/hugepages` |
+| `nic` | A host network interface moved into the capsule's network and configured there; returned when the capsule ends |
+
+A tissue places such a cell only on hosts that offer the cores and the
+interface.
+
 ## Operating it
 
 ```sh
@@ -599,6 +641,10 @@ sized and encrypted volumes need root or the helper; with neither, mesh and
 cell tunnels run in the supervisor (wireguard-go on a tun interface inside
 the capsule's network, which the supervisor owns) because only root may
 create a kernel WireGuard device in the host's network, and that is slower;
+a tissue reacts on a timer (seconds to place, about a lease to take over
+from a dead host) and does not move cells that keep data; the latency
+profile is checked for being applied, not benchmarked, and does not yet
+cover kernel-bypass network stacks;
 the helper is root code reachable by a group, small and fixed in what it
 accepts but a boundary to keep reviewed; orders give no interactive terminal
 and no way to maintain the host's operating system; health checks
@@ -633,6 +679,14 @@ receptors, a sockets-only cell, tunnel secrets rotating every 15 seconds
 throughout, and ticks without the beacon. It and `test/mesh.sh` run both
 with root (the kernel's WireGuard) and without (the tunnel in the
 supervisor).
+
+`test/tissue.sh` plays three hosts on one machine, as root and without:
+growth from needs, placement on different hosts, the draw, a warm and a hot
+standby, takeover with a new term and the old holder standing down, rolling
+out a release, holding back one that does not come up, tissues that are
+forged or replayed, a strict cell cut off from the ledger, and a host
+leaving. `test/latency.sh` checks dedicated cores, memory locking, huge
+pages and an interface handed to a capsule.
 
 `test/order.sh` covers orders, as root and without: every action, the
 signatures an action needs, exec's confinement inside the capsule, sealed

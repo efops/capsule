@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -33,6 +34,22 @@ type Manifest struct {
 	Scale    *Scale            `json:"scale,omitempty"`    // run as replicas that grow and shrink with load
 	Syscalls []string          `json:"syscalls,omitempty"` // allow list; omitted means the default profile
 	Limits   Limits            `json:"limits,omitempty"`
+	Latency  *Latency          `json:"latency,omitempty"` // for programs where microseconds matter
+}
+
+// Latency asks capsule to stay out of the program's way once it has started.
+type Latency struct {
+	Cores      int  `json:"cores,omitempty"`       // whole cores of its own: pinned, shared with no other capsule, never throttled
+	MemoryLock bool `json:"memory_lock,omitempty"` // let the program lock its memory in RAM (mlockall)
+	Hugepages  bool `json:"hugepages,omitempty"`   // give it the host's huge pages at /dev/hugepages
+	Nic        *Nic `json:"nic,omitempty"`         // a network interface of the host, handed over whole
+}
+
+// Nic is a host network interface moved into the capsule for as long as it runs.
+type Nic struct {
+	Name    string `json:"name"`
+	Address string `json:"address,omitempty"` // e.g. 10.0.0.5/24
+	Gateway string `json:"gateway,omitempty"`
 }
 
 // Limits map directly onto cgroup v2 files.
@@ -192,6 +209,8 @@ var hostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
 
 func validPort(p int) bool { return p >= 1 && p <= 65535 }
 
+var nicRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,14}$`)
+
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
 
 func parseManifest(raw []byte) (Manifest, error) {
@@ -270,6 +289,34 @@ func (m Manifest) validate() error {
 			}
 		}
 		seenName[v.Name], seenPath[clean] = true, true
+	}
+	if l := m.Latency; l != nil {
+		switch {
+		case l.Cores < 0 || l.Cores > 1024:
+			return errors.New("latency: cores is out of range")
+		case l.Cores > 0 && m.Limits.CPUs > 0:
+			return errors.New("latency: cores are dedicated and never throttled, so limits.cpus cannot also be set")
+		case l.Cores > 0 && m.Scale != nil:
+			return errors.New("latency: a capsule with dedicated cores cannot also have a scale section")
+		}
+		if n := l.Nic; n != nil {
+			if !nicRE.MatchString(n.Name) {
+				return errors.New("latency: nic.name is not an interface name")
+			}
+			if m.Network == "host" {
+				return errors.New(`latency: a nic is handed to the capsule's own network, so network cannot be "host"`)
+			}
+			if n.Address != "" {
+				if _, err := netip.ParsePrefix(n.Address); err != nil {
+					return errors.New("latency: nic.address must look like 10.0.0.5/24")
+				}
+			}
+			if n.Gateway != "" {
+				if _, err := netip.ParseAddr(n.Gateway); err != nil || n.Address == "" {
+					return errors.New("latency: nic.gateway must be an IP address, and needs nic.address")
+				}
+			}
+		}
 	}
 	if m.Network == "host" && len(m.Publish)+len(m.Egress) > 0 {
 		return errors.New(`publish and egress do not apply to network "host"`)

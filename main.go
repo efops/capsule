@@ -62,6 +62,12 @@ const usage = `usage:
     capsule order result [-wait 30s] <order file or id>
                                              print the hosts' signed answers
     capsule orders                           on a host: carry out the orders waiting for it
+  the tissue: a fleet that keeps cells alive by itself
+    capsule tissue -key <file> [-o <file>] <tissue.json>
+                                             sign which cells must live and on which hosts, and
+                                             publish it; hosts place them by a draw from the beacon
+    capsule tissue status                    what is alive, where, and which draw put it there
+    capsule tend                             on a host: do its part of the tissue
   this host
     capsule host [-export]                   print this host's id and signing key id, or with
                                              -export the host file needed to seal a capsule for it
@@ -113,6 +119,10 @@ func main() {
 		err = enterCapsule()
 	case "__helper": // internal: started as root by systemd for capsule-helper.socket
 		err = cmdHelper()
+	case "tissue":
+		err = cmdTissue(args)
+	case "tend":
+		err = cmdTend(args)
 	case "order":
 		err = cmdOrder(args)
 	case "orders":

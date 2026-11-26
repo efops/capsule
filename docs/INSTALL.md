@@ -103,7 +103,7 @@ same script.
 ## 4. Check it works
 
 ```sh
-capsule version                    # capsule 0.1.0
+capsule version                    # capsule 0.2.0
 sudo capsule host                  # prints this host's id and signing key id
 ```
 
@@ -172,6 +172,21 @@ sudo systemctl enable --now capsule-orders.timer
 For capsules a user runs without root, that user enables their own:
 `systemctl --user enable --now capsule-orders.timer`. Once orders work you
 can close the host's SSH port; keep console access for emergencies.
+
+**A fleet that looks after itself.** The same timer makes a host follow a
+tissue (guide, section 9): a signed list of what must be alive, which the
+hosts keep true between them. Nothing more needs installing.
+
+**Latency-critical capsules.** To let capsules have cores of their own, name
+the cores this host keeps for them in `/etc/capsule/latency`:
+
+```
+cores 2-7
+```
+
+Ideally these are cores the kernel was told to leave alone at boot
+(`isolcpus=2-7 nohz_full=2-7 rcu_nocbs=2-7`). Every other capsule is then
+kept off them.
 
 **More than one host.** Install the same way on each. Then give every host
 the same line in `/etc/capsule/ledger` (see the guide, section 9) and, for

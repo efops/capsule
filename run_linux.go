@@ -255,6 +255,11 @@ func cmdRun(args []string) error {
 		return err
 	}
 	defer removeCgroup(cg)
+	releaseCores, err := assignCores(cg, filepath.Join(runDir, id), m.Latency)
+	if err != nil {
+		return refuse(err)
+	}
+	defer releaseCores()
 	if m.Scale != nil && m.Scale.MemoryMax != "" {
 		// The autoscaler will raise this capsule's memory limit as it fills.
 		// A soft limit just below the hard one, in place before the first
@@ -382,6 +387,13 @@ func cmdRun(args []string) error {
 		}
 		if err := startForwarding(ns, m, publish); err != nil {
 			return abort(err)
+		}
+		if m.Latency != nil && m.Latency.Nic != nil {
+			giveBack, err := handOverNic(ns, *m.Latency.Nic)
+			if err != nil {
+				return abort(fmt.Errorf("latency: %w", err))
+			}
+			defer giveBack()
 		}
 	}
 	started := entry

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -1192,5 +1193,463 @@ func TestOrderResultSealed(t *testing.T) {
 	}
 	if _, _, err := sealResult("not a key", "x"); err == nil {
 		t.Error("a malformed reply key was accepted")
+	}
+}
+
+// ---- the tissue ----
+
+// testWorld builds a world of n hosts and the given cells without a ledger.
+func testWorld(t *testing.T, n int, cells map[string]tissueCell, manifests map[string]Manifest) *world {
+	t.Helper()
+	w := &world{now: 1000, infos: map[string]cellInfo{}, alive: map[string]bool{}, slots: map[string][]slotState{},
+		want: map[string]int{}, wantAt: map[string]uint64{}, halted: map[string]bool{}}
+	w.beacon = func(round uint64) ([]byte, bool) { return fallbackBeacon(round), true }
+	w.t = tissue{Name: "test", Time: 1, Cells: cells}
+	for i := 0; i < n; i++ {
+		id := hashID("test-host", []byte{byte(i)})
+		w.t.Hosts = append(w.t.Hosts, tissueHost{ID: id})
+		w.alive[id] = true
+	}
+	for name, m := range manifests {
+		m.Name = name
+		w.infos[name] = cellInfo{Seal: "sha256:" + strings.Repeat("0", 63) + "1", Manifest: m}
+	}
+	return w
+}
+
+// settle lets every host act on its plan in turn until nothing changes, and returns the claims made.
+func settle(w *world) int {
+	claims := 0
+	for round := 0; round < 20; round++ {
+		acted := false
+		for _, h := range w.t.Hosts {
+			for _, s := range w.plan(h.ID) {
+				if s.Do != "claim" {
+					continue
+				}
+				if cur := w.slot(s.Cell, s.Slot); w.held(cur) || (cur.lease != nil && cur.lease.Term >= s.Term) {
+					continue // lost the race: the key already exists
+				}
+				for len(w.slots[s.Cell]) <= s.Slot {
+					w.slots[s.Cell] = append(w.slots[s.Cell], slotState{})
+				}
+				w.slots[s.Cell][s.Slot] = slotState{lease: &beat{Kind: "lease", Cell: s.Cell, Slot: s.Slot, Term: s.Term, Host: h.ID, Tick: w.now, Round: s.Round, Seal: w.infos[s.Cell].Seal}}
+				claims++
+				acted = true
+			}
+		}
+		if !acted {
+			break
+		}
+	}
+	return claims
+}
+
+func holders(w *world, cell string) []string {
+	var hosts []string
+	for _, s := range w.slots[cell] {
+		if w.held(s) {
+			hosts = append(hosts, s.lease.Host)
+		}
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+func TestTissueGrowsFromNeeds(t *testing.T) {
+	w := testWorld(t, 4, map[string]tissueCell{"web": {Root: true, Min: 2}, "spare": {}}, map[string]Manifest{
+		"web":   {Network: "cell", Needs: []Need{{Name: "db", From: "db"}}},
+		"db":    {Network: "cell", Needs: []Need{{Name: "kv", From: "vault"}, {Name: "back", From: "web"}}}, // a loop is not a problem
+		"vault": {},
+		"spare": {},
+	})
+	counts, short := w.wanted()
+	if counts["web"] != 2 || counts["db"] != 1 || counts["vault"] != 1 || len(short) != 0 {
+		t.Fatalf("wanted %v, short %v", counts, short)
+	}
+	if _, grown := counts["spare"]; grown {
+		t.Error("a cell that is neither a root nor needed was grown")
+	}
+	settle(w)
+	if got := holders(w, "web"); len(got) != 2 || got[0] == got[1] {
+		t.Errorf("web should be on two different hosts: %v", got)
+	}
+	if len(holders(w, "db")) != 1 || len(holders(w, "vault")) != 1 {
+		t.Error("needed cells were not placed")
+	}
+	// A cell that is only needed is never grown past one, whatever load says.
+	w.want["db"] = 5
+	if counts, _ := w.wanted(); counts["db"] != 1 {
+		t.Errorf("an unlisted cell grew to %d", counts["db"])
+	}
+	// A needed cell whose release is missing is reported, not guessed at.
+	delete(w.infos, "vault")
+	if _, short := w.wanted(); len(short) != 1 {
+		t.Errorf("a missing release was not reported: %v", short)
+	}
+}
+
+func TestTissueDraw(t *testing.T) {
+	cells := map[string]tissueCell{"web": {Root: true}}
+	w := testWorld(t, 5, cells, map[string]Manifest{"web": {}})
+	first, _ := w.rank("web", 0, 100, "")
+	again, _ := w.rank("web", 0, 100, "")
+	if len(first) != 5 || strings.Join(first, " ") != strings.Join(again, " ") {
+		t.Fatal("the same round must give every host the same order")
+	}
+	// Every host, planning alone, agrees who the winner is: exactly one claims at once.
+	claimers := 0
+	for _, h := range w.t.Hosts {
+		for _, s := range w.plan(h.ID) {
+			if s.Do == "claim" {
+				claimers++
+				if h.ID != first[0] && drawRound(w.now) == 100 {
+					t.Error("a host other than the winner claimed first")
+				}
+			}
+		}
+	}
+	if claimers != 1 {
+		t.Errorf("%d hosts claimed a fresh slot at once, want only the winner", claimers)
+	}
+	// Different rounds and different slots give different winners over time.
+	winners := map[string]bool{}
+	for round := uint64(0); round < 400; round += tissueEpoch {
+		order, _ := w.rank("web", 0, round, "")
+		winners[order[0]] = true
+	}
+	if len(winners) != 5 {
+		t.Errorf("over 20 rounds only %d of 5 hosts ever won", len(winners))
+	}
+	// Weight is the share of draws a host wins.
+	w.t.Hosts[0].Weight = 9
+	wins := 0
+	for round := uint64(0); round < 4000; round += tissueEpoch {
+		if order, _ := w.rank("web", 0, round, ""); order[0] == w.t.Hosts[0].ID {
+			wins++
+		}
+	}
+	if wins < 120 || wins > 160 { // 9 of 13 shares of 200 draws is about 138
+		t.Errorf("a host with 9 of 13 shares won %d of 200 draws", wins)
+	}
+	// A silent host is not in the draw at all.
+	w.alive[first[0]] = false
+	if order, _ := w.rank("web", 0, 100, ""); slices.Contains(order, first[0]) {
+		t.Error("a host that has stopped pulsing was still drawn")
+	}
+}
+
+func TestTissueLeaseAndTakeover(t *testing.T) {
+	w := testWorld(t, 3, map[string]tissueCell{"db": {Root: true, Standby: "warm"}}, map[string]Manifest{"db": {}})
+	settle(w)
+	holder := holders(w, "db")[0]
+	understudy := w.understudy("db", 0)
+	if understudy == "" || understudy == holder {
+		t.Fatalf("understudy %q, holder %q", understudy, holder)
+	}
+	doing := func(host string) string {
+		var all []string
+		for _, s := range w.plan(host) {
+			all = append(all, s.Do)
+		}
+		return strings.Join(all, ",")
+	}
+	if doing(holder) != "hold" || doing(understudy) != "ready" {
+		t.Errorf("holder does %q, understudy does %q", doing(holder), doing(understudy))
+	}
+	// While the lease lasts nobody else moves.
+	w.now += w.t.lease()
+	for _, h := range w.t.Hosts {
+		if strings.Contains(doing(h.ID), "claim") {
+			t.Error("a slot was claimed while its lease was still good")
+		}
+	}
+	// Once it lapses the understudy takes it at once, with the next term; the others wait.
+	w.now += 1
+	for _, h := range w.t.Hosts {
+		claims := strings.Contains(doing(h.ID), "claim")
+		if claims != (h.ID == understudy) {
+			t.Errorf("host claims=%v right after the lapse; only the understudy should", claims)
+		}
+	}
+	for _, s := range w.plan(understudy) {
+		if s.Do == "claim" && s.Term != 2 {
+			t.Errorf("takeover used term %d, want 2", s.Term)
+		}
+	}
+	// If the understudy does nothing, the others step in after a pause, the old holder last.
+	w.now += tissueStagger
+	third := ""
+	for _, h := range w.t.Hosts {
+		if h.ID != holder && h.ID != understudy {
+			third = h.ID
+		}
+	}
+	if !strings.Contains(doing(third), "claim") {
+		t.Error("nobody stepped in for an understudy that did not act")
+	}
+	if strings.Contains(doing(holder), "claim") {
+		t.Error("the host that let the lease lapse was first back in line")
+	}
+	// A cell that keeps data only comes back where its data is.
+	w = testWorld(t, 3, map[string]tissueCell{"db": {Root: true}}, map[string]Manifest{"db": {Volumes: []Volume{{Name: "data", Path: "/data"}}}})
+	settle(w)
+	holder = holders(w, "db")[0]
+	w.now += w.t.lease() + 10
+	for _, h := range w.t.Hosts {
+		claims := false
+		for _, s := range w.plan(h.ID) {
+			claims = claims || s.Do == "claim"
+		}
+		if claims != (h.ID == holder) {
+			t.Error("a cell with volumes was offered to a host that does not have its data")
+		}
+	}
+}
+
+func TestTissueLimits(t *testing.T) {
+	manifests := map[string]Manifest{"web": {Limits: Limits{Memory: "1G", CPUs: 1}}, "big": {Limits: Limits{Memory: "3G", CPUs: 1}}}
+	w := testWorld(t, 3, map[string]tissueCell{"web": {Root: true, Min: 2, Max: 3}, "big": {Root: true}}, manifests)
+	w.t.Budget = &Limits{Memory: "4G"}
+	counts, short := w.wanted()
+	if counts["big"] != 1 || counts["web"] != 1 || len(short) != 1 {
+		t.Errorf("a 4G budget should hold big and one web: %v, short %v", counts, short)
+	}
+	w.t.Budget = nil
+	// Load can ask for more, but never past the signed maximum.
+	w.want["web"] = 7
+	if counts, _ := w.wanted(); counts["web"] != 3 {
+		t.Errorf("web grew to %d, past its maximum of 3", counts["web"])
+	}
+	w.want["web"] = 0
+	// A host takes only what fits in what it offers, and labels are respected.
+	for i := range w.t.Hosts {
+		w.t.Hosts[i].Memory = "2G"
+	}
+	w.t.Hosts[2].Memory, w.t.Hosts[2].Labels = "8G", []string{"large"}
+	settle(w)
+	if got := holders(w, "big"); len(got) != 1 || got[0] != w.t.Hosts[2].ID {
+		t.Errorf("big (3G) must land on the only host that offers enough: %v", got)
+	}
+	w = testWorld(t, 3, map[string]tissueCell{"web": {Root: true, On: []string{"eu"}}}, manifests)
+	w.t.Hosts[1].Labels = []string{"eu"}
+	settle(w)
+	if got := holders(w, "web"); len(got) != 1 || got[0] != w.t.Hosts[1].ID {
+		t.Errorf("web must land on the host labelled eu: %v", got)
+	}
+	// A cell that needs dedicated cores and a network card goes only where they are.
+	fast := map[string]Manifest{"feed": {Latency: &Latency{Cores: 2, Nic: &Nic{Name: "eth1"}}}}
+	w = testWorld(t, 3, map[string]tissueCell{"feed": {Root: true}}, fast)
+	w.t.Hosts[0].Cores, w.t.Hosts[0].Nics = 4, []string{"eth1"}
+	w.t.Hosts[1].Cores = 4
+	settle(w)
+	if got := holders(w, "feed"); len(got) != 1 || got[0] != w.t.Hosts[0].ID {
+		t.Errorf("feed must land on the host with cores and the card: %v", got)
+	}
+}
+
+func TestTissueGrowsAndShrinksWithLoad(t *testing.T) {
+	w := testWorld(t, 4, map[string]tissueCell{"web": {Root: true, Min: 1, Max: 3}}, map[string]Manifest{"web": {}})
+	settle(w)
+	speaker := holders(w, "web")[0]
+	wantStep := func() (int, bool) {
+		for _, s := range w.plan(speaker) {
+			if s.Do == "want" {
+				return s.Want, true
+			}
+		}
+		return 0, false
+	}
+	setBusy := func(percent int) {
+		for i := range w.slots["web"] {
+			s := &w.slots["web"][i]
+			if s.lease != nil {
+				s.pulse = &beat{Kind: "pulse", Cell: "web", Slot: i, Term: s.lease.Term, Host: s.lease.Host, Tick: w.now, Busy: percent, Seal: s.lease.Seal}
+			}
+		}
+	}
+	setBusy(95)
+	if n, ok := wantStep(); !ok || n != 1 {
+		t.Fatalf("a busy cell should ask for one more: %d %v", n, ok)
+	}
+	w.want["web"], w.wantAt["web"] = 1, w.now
+	settle(w)
+	setBusy(95)
+	if _, ok := wantStep(); ok {
+		t.Error("a cell grew twice within one epoch")
+	}
+	w.now += tissueEpoch
+	setBusy(95)
+	if n, ok := wantStep(); !ok || n != 2 {
+		t.Errorf("after an epoch a busy cell should ask again: %d %v", n, ok)
+	}
+	w.want["web"], w.wantAt["web"] = 2, w.now
+	settle(w)
+	w.now += tissueEpoch
+	setBusy(95)
+	if _, ok := wantStep(); ok {
+		t.Error("a cell asked to grow past its maximum")
+	}
+	setBusy(5)
+	if n, ok := wantStep(); !ok || n != 1 {
+		t.Errorf("an idle cell should give one back: %d %v", n, ok)
+	}
+}
+
+func TestTissueGenerations(t *testing.T) {
+	w := testWorld(t, 4, map[string]tissueCell{"web": {Root: true, Min: 3}}, map[string]Manifest{"web": {}})
+	settle(w)
+	old := w.infos["web"].Seal
+	fresh := "sha256:" + strings.Repeat("0", 63) + "2"
+	pulseAll := func() {
+		for i := range w.slots["web"] {
+			s := &w.slots["web"][i]
+			seal := old
+			if s.pulse != nil {
+				seal = s.pulse.Seal
+			}
+			s.pulse = &beat{Kind: "pulse", Cell: "web", Slot: i, Term: s.lease.Term, Host: s.lease.Host, Tick: w.now, Seal: seal}
+		}
+	}
+	pulseAll()
+	info := w.infos["web"]
+	info.Seal, info.Released = fresh, time.Now().UnixNano()
+	w.infos["web"] = info
+	due := func() (slots []int) {
+		for i := range w.slots["web"] {
+			if w.due("web", i, 3, info) {
+				slots = append(slots, i)
+			}
+		}
+		return slots
+	}
+	var order []int
+	for len(order) < 3 {
+		now := due()
+		if len(now) != 1 {
+			t.Fatalf("with step 1 exactly one slot may move at a time, got %v after %v", now, order)
+		}
+		order = append(order, now[0])
+		w.slots["web"][now[0]].pulse.Seal = fresh
+	}
+	if len(due()) != 0 {
+		t.Error("a slot on the current release was told to move again")
+	}
+	// A release that failed somewhere is not tried by anyone else.
+	for i := range w.slots["web"] {
+		w.slots["web"][i].pulse.Seal = old
+	}
+	w.halted["web "+fresh] = true
+	if len(due()) != 0 {
+		t.Error("a release that was held back was tried again")
+	}
+	// Two at a time when the tissue says so.
+	delete(w.halted, "web "+fresh)
+	c := w.t.Cells["web"]
+	c.Step = 2
+	w.t.Cells["web"] = c
+	if len(due()) != 2 {
+		t.Errorf("with step 2, two slots may move at once: %v", due())
+	}
+}
+
+func TestTissueSignedAndChecked(t *testing.T) {
+	newHost(t)
+	dir := t.TempDir()
+	opPath, _ := newKey(t, dir, "op")
+	op, _ := loadSigner(opPath)
+	hostKey, _ := hostSigner()
+	me, _ := hostID()
+	tis := tissue{Name: "prod", Time: 5, Cells: map[string]tissueCell{"web": {Root: true}}, Hosts: []tissueHost{{ID: me, SignKey: hostKey.pub}}}
+	if err := tis.validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []func(*tissue){
+		func(x *tissue) { x.Cells = map[string]tissueCell{"web": {}} },                           // no root
+		func(x *tissue) { x.Cells = map[string]tissueCell{"web": {Root: true, Min: 3, Max: 2}} }, // max below min
+		func(x *tissue) { x.Cells = map[string]tissueCell{"web": {Root: true, Standby: "lukewarm"}} },
+		func(x *tissue) { x.Hosts = append(x.Hosts, x.Hosts[0]) }, // a host twice
+		func(x *tissue) { x.Lease = 1 },
+		func(x *tissue) { x.Name = "../x" },
+	} {
+		broken := tis
+		bad(&broken)
+		if broken.validate() == nil {
+			t.Errorf("an invalid tissue was accepted: %+v", broken)
+		}
+	}
+	// A beat counts only if the host it names signed it, with the key the tissue lists for that host.
+	b := beat{Kind: "lease", Cell: "web", Term: 1, Host: me, Tick: 10, Key: hostKey.pub}
+	b.Signature = hostKey.sign(b.message())
+	if !b.from(tis) {
+		t.Fatal("a host's own beat was not accepted")
+	}
+	forged := b
+	forged.Term = 9
+	if forged.from(tis) {
+		t.Error("a beat changed after signing was accepted")
+	}
+	outsider := beat{Kind: "lease", Cell: "web", Term: 2, Host: me, Tick: 10, Key: op.pub}
+	outsider.Signature = op.sign(outsider.message())
+	if outsider.from(tis) {
+		t.Error("a beat signed by a key that is not that host's was accepted")
+	}
+	// Operators sign the tissue; the host counts them like it counts an order's signatures.
+	os.MkdirAll(filepath.Join(os.Getenv("CAPSULE_CONFIG"), "operators.d"), 0o755)
+	os.WriteFile(filepath.Join(os.Getenv("CAPSULE_CONFIG"), "operators.d", "op.pub"), []byte(op.pub), 0o644)
+	rules, _ := loadOrderRules()
+	if rules.signedByEnough("tissue", tis.message(), nil) == nil {
+		t.Error("an unsigned tissue was accepted")
+	}
+	tis.Signatures = []orderSig{{op.pub, op.sign(tis.message())}}
+	if err := rules.signedByEnough("tissue", tis.message(), tis.Signatures); err != nil {
+		t.Errorf("an operator's tissue was refused: %v", err)
+	}
+	tis.Cells["extra"] = tissueCell{Root: true}
+	if rules.signedByEnough("tissue", tis.message(), tis.Signatures) == nil {
+		t.Error("a tissue changed after signing was accepted")
+	}
+}
+
+func TestLatencyManifest(t *testing.T) {
+	base := `{"name":"feed","command":["/bin/feed"],%s}`
+	good := []string{
+		`"latency":{"cores":2,"memory_lock":true,"hugepages":true}`,
+		`"latency":{"nic":{"name":"eth1","address":"10.0.0.5/24","gateway":"10.0.0.1"}}`,
+	}
+	for _, g := range good {
+		if _, err := parseManifest([]byte(fmt.Sprintf(base, g))); err != nil {
+			t.Errorf("%s: %v", g, err)
+		}
+	}
+	bad := []string{
+		`"latency":{"cores":2},"limits":{"cpus":1}`,          // dedicated and throttled at once
+		`"latency":{"nic":{"name":"eth1"}},"network":"host"`, // nothing to hand it to
+		`"latency":{"nic":{"name":"../x"}}`,
+		`"latency":{"nic":{"name":"eth1","address":"10.0.0.5"}}`, // no prefix length
+		`"latency":{"nic":{"name":"eth1","gateway":"10.0.0.1"}}`, // gateway without an address
+		`"latency":{"cores":-1}`,
+	}
+	for _, b := range bad {
+		if _, err := parseManifest([]byte(fmt.Sprintf(base, b))); err == nil {
+			t.Errorf("accepted: %s", b)
+		}
+	}
+}
+
+func TestTissueTermsSkipLeasesThatNoLongerCount(t *testing.T) {
+	w := testWorld(t, 2, map[string]tissueCell{"web": {Root: true}}, map[string]Manifest{"web": {}})
+	// Terms 1 to 3 exist in the ledger, taken by a host that has since left the tissue.
+	w.slots["web"] = []slotState{{top: 3}}
+	terms := map[int]bool{}
+	for _, h := range w.t.Hosts {
+		for _, s := range w.plan(h.ID) {
+			if s.Do == "claim" {
+				terms[s.Term] = true
+			}
+		}
+	}
+	if len(terms) != 1 || !terms[4] {
+		t.Errorf("the next claim must take term 4, got %v", terms)
 	}
 }

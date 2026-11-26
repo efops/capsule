@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -116,14 +117,43 @@ func cmdPublish(args []string) error {
 	if err := store.putFile("capsules/"+name+"/"+idHex(sc.ID)+".tar", archive.Name()); err != nil {
 		return err
 	}
+	// The manifest and seal by themselves, for hosts that plan with them before fetching anything.
+	card, _ := json.Marshal(releaseCard{Manifest: b64.EncodeToString(sc.ManifestRaw), Seal: sc.Seal})
+	if err := l.put(releaseCardKey(name, sc.ID), card); err != nil {
+		return err
+	}
 	r := release{Name: name, Seal: sc.ID, Time: time.Now().UnixNano(), Signer: key.pub}
 	r.Signature = key.sign(r.message())
 	raw, _ := json.Marshal(r)
 	if err := l.put("capsules/"+name+"/current", raw); err != nil {
 		return err
 	}
+	// And for good: the releases there have been, newest last.
+	if _, err := l.create(fmt.Sprintf("capsules/%s/releases/%020d", name, r.Time), raw); err != nil {
+		return err
+	}
 	fmt.Printf("published %s %s\n", name, sc.ID)
 	return nil
+}
+
+// releaseHistory lists the releases of a capsule that were published, newest
+// first, the current one included. Nothing in it is checked here.
+func releaseHistory(l ledger, name string) []release {
+	var all []release
+	add := func(key string) {
+		var r release
+		if raw, found, err := l.get(key); err == nil && found && json.Unmarshal(raw, &r) == nil && r.Name == name {
+			all = append(all, r)
+		}
+	}
+	add("capsules/" + name + "/current")
+	keys, _ := l.list("capsules/" + name + "/releases/")
+	sort.Sort(sort.Reverse(sort.StringSlice(keys)))
+	for _, key := range keys[:min(len(keys), 8)] {
+		add(key)
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].Time > all[j].Time })
+	return all
 }
 
 // cmdFetch installs the current release of a capsule on this host, or
@@ -151,25 +181,47 @@ func cmdFetch(args []string) error {
 }
 
 // fetchRelease does the work of fetch and says what it did.
-func fetchRelease(name, dir string, trusted trustSet) (string, error) {
+//
+// With a seal named, it installs that exact release instead of the current
+// one. That is for a tissue, which holds back a release that failed to come
+// up: the choice is then made from host-signed records, and the release
+// must still be one a trusted key published.
+func fetchRelease(name, dir string, trusted trustSet, exactly ...string) (string, error) {
 	l, store, err := blobs()
 	if err != nil {
 		return "", err
 	}
-	raw, found, err := l.get("capsules/" + name + "/current")
-	if err != nil {
-		return "", err
-	}
 	var r release
-	if !found || json.Unmarshal(raw, &r) != nil || r.Name != name {
-		return "", fmt.Errorf("%s has not been published to this ledger", name)
+	want := ""
+	if len(exactly) == 1 {
+		want = exactly[0]
 	}
-	if !signedBy(trusted, r.Signer, r.Signature, r.message()) {
-		return "", fmt.Errorf("the release of %s is not signed by a key this host trusts", name)
+	if want != "" {
+		found := false
+		for _, past := range releaseHistory(l, name) {
+			if past.Seal == want && signedBy(trusted, past.Signer, past.Signature, past.message()) {
+				r, found = past, true
+				break
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("no trusted release of %s with seal %s is in this ledger", name, want)
+		}
+	} else {
+		raw, found, err := l.get("capsules/" + name + "/current")
+		if err != nil {
+			return "", err
+		}
+		if !found || json.Unmarshal(raw, &r) != nil || r.Name != name {
+			return "", fmt.Errorf("%s has not been published to this ledger", name)
+		}
+		if !signedBy(trusted, r.Signer, r.Signature, r.message()) {
+			return "", fmt.Errorf("the release of %s is not signed by a key this host trusts", name)
+		}
 	}
 	// Do not let the store hand back an older release than one already seen.
 	seenFile := filepath.Join(dataDir(), "fetched", name)
-	if prev, err := os.ReadFile(seenFile); err == nil {
+	if prev, err := os.ReadFile(seenFile); err == nil && want == "" {
 		stamp, seal, _ := strings.Cut(strings.TrimSpace(string(prev)), " ")
 		last, _ := strconv.ParseInt(stamp, 10, 64)
 		if r.Time < last || (r.Time == last && r.Seal != seal) {

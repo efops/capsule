@@ -101,7 +101,7 @@ func systemctl(args ...string) ([]byte, error) {
 }
 
 func capsuleUnits(name string) []string {
-	units := []string{"capsule-run-" + name + ".service"}
+	units := []string{"capsule-run-" + name + ".service", cellUnit(name)}
 	// The installed unit runs what is in the host's usual places, so it only stands in when those are in use.
 	if _, err := os.Stat(unitTemplate); err == nil && realRoot() && dataDir() == "/var/lib/capsule" && configDir() == "/etc/capsule" {
 		units = append([]string{"capsule@" + name + ".service"}, units...)
@@ -118,7 +118,20 @@ func instancesNamed(name string) (ids []string) {
 	return ids
 }
 
-func startCapsule(name string) (string, error) {
+// cellUnit is the unit a tissue runs a cell in. It never fetches by itself: which release runs is the tissue's to decide.
+func cellUnit(name string) string {
+	if os.Getenv("CAPSULE_DATA") == "" {
+		return "capsule-cell-" + name + ".service"
+	}
+	// Several sets of capsule state on one machine, as in tests, must not share a unit.
+	return "capsule-cell-" + name + "-" + idHex(digest([]byte(dataDir())))[:8] + ".service"
+}
+
+func startCapsule(name string) (string, error) { return startCapsuleUnit(name, "", true) }
+
+// startCapsuleUnit starts a capsule under systemd and waits for it to be
+// up. With no unit named it picks the usual one for an order.
+func startCapsuleUnit(name, unit string, fetch bool, exactly ...string) (string, error) {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return "", errors.New("run orders need systemd on the host, to keep the capsule running after the order is done")
 	}
@@ -131,10 +144,10 @@ func startCapsule(name string) (string, error) {
 	}
 	dir := filepath.Join(dataDir(), "apps", name)
 	note := ""
-	if _, _, err := blobs(); err == nil {
+	if _, _, err := blobs(); err == nil && fetch {
 		// Pick up the current release first. A host that already has the
 		// capsule can still start it while the ledger is out of reach.
-		if note, err = fetchRelease(name, "", trusted); err != nil {
+		if note, err = fetchRelease(name, "", trusted, exactly...); err != nil {
 			if _, serr := readSeal(dir); serr != nil {
 				return "", err
 			}
@@ -145,8 +158,9 @@ func startCapsule(name string) (string, error) {
 		return note, fmt.Errorf("refusing to run: %w", err)
 	}
 	began := time.Now().Add(-time.Second)
-	units := capsuleUnits(name)
-	unit := units[0]
+	if unit == "" {
+		unit = capsuleUnits(name)[0]
+	}
 	if strings.HasPrefix(unit, "capsule@") {
 		if out, err := systemctl("start", unit); err != nil {
 			return note, fmt.Errorf("starting %s: %s", unit, strings.TrimSpace(string(out)))
@@ -155,6 +169,10 @@ func startCapsule(name string) (string, error) {
 		self, err := os.Executable()
 		if err != nil {
 			return note, err
+		}
+		// A unit of this name that is failing or winding down would be in the way.
+		if state, _ := systemctl("is-active", unit); strings.TrimSpace(string(state)) != "inactive" {
+			systemctl("stop", unit)
 		}
 		systemctl("reset-failed", unit)
 		args := []string{"--unit", unit, "--collect", "--quiet",
@@ -169,18 +187,37 @@ func startCapsule(name string) (string, error) {
 			}
 		}
 		args = append(args, "--", self, "run", dir)
-		if out, err := exec.Command("systemd-run", args...).CombinedOutput(); err != nil {
-			return note, fmt.Errorf("starting %s: %s", unit, strings.TrimSpace(string(out)))
+		for attempt := 0; ; attempt++ {
+			out, err := exec.Command("systemd-run", args...).CombinedOutput()
+			if err == nil {
+				break
+			}
+			// systemd may take a moment to forget a unit that has just stopped.
+			if attempt == 20 || !strings.Contains(string(out), "already loaded") {
+				return note, fmt.Errorf("starting %s: %s", unit, strings.TrimSpace(string(out)))
+			}
+			time.Sleep(250 * time.Millisecond)
 		}
 	}
+	// Up means still up a moment later: a program that dies at once is seen
+	// for an instant each time systemd tries it again, and must not count.
+	seen := map[string]time.Time{}
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
-		if ids := instancesNamed(name); len(ids) > 0 {
-			return strings.TrimSpace(note + "\nstarted " + strings.Join(ids, " ")), nil
+		ids := instancesNamed(name)
+		for _, id := range ids {
+			if first, known := seen[id]; !known {
+				seen[id] = time.Now()
+			} else if time.Since(first) >= 1500*time.Millisecond {
+				return strings.TrimSpace(note + "\nstarted " + strings.Join(ids, " ")), nil
+			}
 		}
 		if why := refusedSince(name, began); why != "" {
 			systemctl("stop", unit) // do not leave it trying again every two seconds
 			return note, errors.New(why)
 		}
+	}
+	if len(seen) > 0 {
+		return note, fmt.Errorf("%s starts and stops again at once; its program is failing (unit %s)", name, unit)
 	}
 	return note, fmt.Errorf("%s was started as %s but is not running yet; look at the host's record with a log order", name, unit)
 }
