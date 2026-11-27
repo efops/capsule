@@ -52,7 +52,7 @@ release() { # $1 = name, $2 = shell script, $3 = extra manifest fields
   oper publish -key dev.key -trust dev.pub "src/$1" >/dev/null
 }
 count() { n=0; for h in a b c; do n=$((n + $(on $h ps 2>/dev/null | grep -c "^$1-" || true))); done; echo $n; }
-where() { for h in a b c; do on $h ps 2>/dev/null | grep -q "^$1-" && printf '%s ' $h; done; }
+where() { for h in a b c; do on $h ps 2>/dev/null | grep -q "^$1-" && printf '%s ' $h; done; true; }
 tend() { for h in "$@"; do on $h tend 2>>tend.log & done; wait; }
 until_true() { hosts=$1; shift; for i in $(seq 1 40); do tend $hosts; if "$@"; then return 0; fi; sleep 1; done; return 1; }
 holder() { oper tissue status | awk -v c="$1" '$1 == c {print $3}' | head -1; } # first 8 hex of the host id
@@ -149,7 +149,7 @@ JSON
   others=$(echo "a b c" | sed "s/$H//")
   elsewhere() { for h in $others; do on $h ps | grep -q '^vault-' && return 0; done; return 1; }
   until_true "$others" elsewhere || fail "nobody took vault over after its host went silent"
-  N=$(for h in $others; do on $h ps | grep -q '^vault-' && echo $h; done)
+  N=$(for h in $others; do on $h ps | grep -q '^vault-' && echo $h; done; true)
   [ "$(cat "$W/$N/data/volumes/vault/data/data/id" 2>/dev/null)" = "$ID" ] && pass "when its host goes silent, the cell comes back on another with the data of its last snapshot" || fail "data on $N after a crash: $(cat "$W/$N/data/volumes/vault/data/data/id" 2>&1), want $ID"
 fi
 for h in a b c; do on $h log >/dev/null 2>&1 || fail "the record of host $h does not verify"; done
