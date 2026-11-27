@@ -718,7 +718,8 @@ that release is held back on every host until you publish another.
 `detect` time. The two copies then watch each other directly, over the mesh,
 every few milliseconds. When the standby stops hearing the holder it takes
 over at once, without waiting for the ledger or a timer: in our tests about
-110 ms after the holder fell silent, with `"detect": "100ms"`. A program
+110 ms after the holder fell silent, with `"detect": "100ms"` (nearer 280 ms
+on a slow, emulated machine). A program
 finds out which it is by reading `/run/capsule/role`: `holder`, `standby`,
 or `holder promoted` when it has just stepped up. If the holder was only
 slow and comes back, the tissue makes the standby a standby again, so for a

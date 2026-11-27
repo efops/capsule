@@ -4,7 +4,7 @@
 
 ### Added
 
-- **Takeover in milliseconds** (#4). A cell with a hot standby and `detect` (for example `"50ms"`) has its instances watch each other directly over the mesh. The standby promotes itself the moment the holder falls silent, with no ledger and no timer on the path. Measured at 103 to 118 ms with `detect` at 100 ms.
+- **Takeover in milliseconds** (#4). A cell with a hot standby and `detect` (for example `"50ms"`) has its instances watch each other directly over the mesh. The standby promotes itself the moment the holder falls silent, with no ledger and no timer on the path. Measured with `detect` at 100 ms: 99 to 118 ms on the arm64 test machine, 260 to 297 ms on the emulated x86-64 one.
 - **Roles** (#4). A program in a tissue reads `/run/capsule/role`: `holder`, `standby`, or `holder promoted`.
 - **Strict takeover is enforced by the supervisor** (#4). A strict cell's own supervisor stops it when its lease runs out unrenewed, even if nothing else on the host is running.
 - **Data follows its cell** (#6). `snapshot` on a cell with volumes ships encrypted copies of them, and a host taking the cell over restores the latest first.
