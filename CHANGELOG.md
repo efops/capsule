@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- **Takeover in milliseconds** (#4). A cell with a hot standby and `detect` (for example `"50ms"`) has its instances watch each other directly over the mesh. The standby promotes itself the moment the holder falls silent, with no ledger and no timer on the path. Measured with `detect` at 100 ms: 99 to 118 ms on the arm64 test machine, 260 to 297 ms on the emulated x86-64 one.
+- **Roles** (#4). A program in a tissue reads `/run/capsule/role`: `holder`, `standby`, or `holder promoted`.
+- **Strict takeover is enforced by the supervisor** (#4). A strict cell's own supervisor stops it when its lease runs out unrenewed, even if nothing else on the host is running.
+- **Data follows its cell** (#6). `snapshot` on a cell with volumes ships encrypted copies of them, and a host taking the cell over restores the latest first.
+- **Draining a host**: `"drain": true` hands over everything a host holds, with a last snapshot of any data, before it is taken out of the tissue.
+- **Devices for the latency profile** (#5): `latency.devices` gives a capsule device files of the host, which with huge pages and locked memory is what a kernel-bypass network stack asks for.
+- `/etc/capsule/advertise`: a host's address for the mesh, set once for every capsule it runs.
+
+### Known issues and limits
+
+- **Millisecond takeover needs the mesh.** The instances reach each other through their tunnels, so the cell must use `network: mesh` or `cell`, and the hosts must share their cards. A warm standby still waits for a lease to lapse.
+- **A promoted standby and a slow holder can overlap.** If the holder was only stalled and comes back within its lease, both believed they were the holder for that moment. The tissue then makes the standby a standby again. Use `takeover: strict` where that must never happen.
+- **A crash loses up to one snapshot interval.** Snapshots are periodic copies, not replication. A drain loses nothing.
+- **Live snapshots need a sized volume.** A plain volume is copied only when its cell is stopped, which a drain does; a cell on plain volumes that crashes stays pinned to its host.
+- **Encrypted volumes** come back on another host only if that host can open them (`recovery.d`, or `capsule volumes -grant`).
+- **Taking a host out without draining it** leaves its cells with data unable to move, and its last leases are simply ignored.
+- **The latency profile is still unbenchmarked**, needs root, and no kernel-bypass stack has been run in a capsule (#9).
+- **Tested against a shared-directory ledger, on one machine playing several hosts.**
+- Everything listed under 0.2.0 that is not named above still applies.
+
 ## 0.2.0
 
 ### Added

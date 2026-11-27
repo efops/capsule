@@ -563,8 +563,8 @@ The file:
 | `name` | The tissue's name |
 | `lease` | Ticks a renewal lasts (default 10) |
 | `budget` | `memory`, `cpus`: the most the whole tissue may commit |
-| `cells.<name>` | `root`, `min`, `max`, `on`, `standby` (`warm`, `hot`), `takeover` (`fast`, `strict`), `step` |
-| `hosts[]` | `file` (from `capsule host -export`), `labels`, `weight`, `memory`, `cpus`, `cores`, `nics` |
+| `cells.<name>` | `root`, `min`, `max`, `on`, `standby` (`warm`, `hot`), `takeover` (`fast`, `strict`), `step`, `detect`, `snapshot` |
+| `hosts[]` | `file` (from `capsule host -export`), `labels`, `weight`, `memory`, `cpus`, `cores`, `nics`, `drain` |
 
 ### tend
 

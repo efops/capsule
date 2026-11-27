@@ -29,6 +29,8 @@ test: ## unit tests, then every suite against the installed binary; needs Linux,
 	sg capsule -c "sh test/helper.sh $(PREFIX)/bin/capsule"
 	sudo sh test/tissue.sh $(PREFIX)/bin/capsule
 	sh test/tissue.sh $(PREFIX)/bin/capsule
+	sudo sh test/takeover.sh $(PREFIX)/bin/capsule
+	sh test/takeover.sh $(PREFIX)/bin/capsule
 	sudo sh test/latency.sh $(PREFIX)/bin/capsule
 	sudo sh test/e2e.sh $(PREFIX)/bin/capsule
 	sudo sh test/scale.sh $(PREFIX)/bin/capsule

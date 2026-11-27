@@ -18,6 +18,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -51,6 +52,7 @@ func cmdRun(args []string) error {
 	advertise := fl.String("advertise", "", "mesh: this host's IP, so a self-issued card tells peers where to connect")
 	receiptPath := fl.String("receipt", "", "write a signed receipt of this run, including a hash of its output, to this file")
 	isReplica := fl.Bool("replica", false, "internal: this run is one replica started by the autoscaler")
+	tissueState := fl.String("tissue", "", "internal: a directory through which a tissue tells this run its role, and how long its lease is good")
 	var publish publishFlag
 	fl.Var(&publish, "publish", "[addr:]hostport:capsuleport, for a port the manifest lists under publish")
 	fl.Parse(args)
@@ -64,6 +66,10 @@ func cmdRun(args []string) error {
 		return runInUserns(args)
 	}
 	rootless := !realRoot()
+	if *advertise == "" {
+		// The host's address for the mesh can be set once for every capsule it runs.
+		*advertise = strings.TrimSpace(readText(filepath.Join(configDir(), "advertise")))
+	}
 	running() // clears up after any capsule here whose supervisor was killed, such as this one's predecessor
 	// Children are killed if the thread that started them exits, so pin this one.
 	runtime.LockOSThread()
@@ -233,6 +239,10 @@ func cmdRun(args []string) error {
 			return err
 		}
 		net = &mesh{id: id, name: m.Name, peers: m.peers(), cards: *cards, trusted: keys, cell: m.Network == "cell", user: rootless}
+		if heartbeatEvery(*tissueState) > 0 {
+			// The instances of this cell watch each other: one more peer, itself, on one port.
+			net.peers = append(net.peers, Peer{Name: m.Name, InUDP: []int{pulsePort()}, OutUDP: []int{pulsePort()}})
+		}
 		for _, n := range m.Needs {
 			if n.Port != 0 {
 				net.cellNeeds = append(net.cellNeeds, n)
@@ -305,6 +315,10 @@ func cmdRun(args []string) error {
 			return err
 		}
 		defer os.Remove(spec.Stage + suffix)
+	}
+	if *tissueState != "" {
+		// What the tissue says of this instance, for the application to read: /run/capsule/role.
+		spec.Volumes = append(spec.Volumes, volumeMount{Source: *tissueState, Path: "/run/capsule"})
 	}
 	if m.Network == "cell" {
 		// Where the cell's sockets live: the application sees it as /run/cell.
@@ -394,6 +408,14 @@ func cmdRun(args []string) error {
 				return abort(fmt.Errorf("latency: %w", err))
 			}
 			defer giveBack()
+		}
+	}
+	if *tissueState != "" {
+		go keepLease(*tissueState, cg, m.Name)
+		if every := heartbeatEvery(*tissueState); every > 0 && net != nil {
+			if err := startHeart(net, *tissueState, every); err != nil {
+				return abort(fmt.Errorf("heartbeat: %w", err))
+			}
 		}
 	}
 	started := entry

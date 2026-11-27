@@ -43,6 +43,9 @@ type Latency struct {
 	MemoryLock bool `json:"memory_lock,omitempty"` // let the program lock its memory in RAM (mlockall)
 	Hugepages  bool `json:"hugepages,omitempty"`   // give it the host's huge pages at /dev/hugepages
 	Nic        *Nic `json:"nic,omitempty"`         // a network interface of the host, handed over whole
+	// Devices are device files of the host the capsule may open, such as
+	// /dev/vfio/vfio for a network stack that bypasses the kernel.
+	Devices []string `json:"devices,omitempty"`
 }
 
 // Nic is a host network interface moved into the capsule for as long as it runs.
@@ -298,6 +301,13 @@ func (m Manifest) validate() error {
 			return errors.New("latency: cores are dedicated and never throttled, so limits.cpus cannot also be set")
 		case l.Cores > 0 && m.Scale != nil:
 			return errors.New("latency: a capsule with dedicated cores cannot also have a scale section")
+		}
+		for _, d := range l.Devices {
+			if !strings.HasPrefix(d, "/dev/") || filepath.Clean(d) != d || len(d) > 128 ||
+				slices.Contains([]string{"/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty", "/dev/hugepages", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"}, d) ||
+				strings.HasPrefix(d, "/dev/hugepages/") || strings.HasPrefix(d, "/dev/fd/") {
+				return fmt.Errorf("latency: %q is not a device file a capsule can be given", d)
+			}
 		}
 		if n := l.Nic; n != nil {
 			if !nicRE.MatchString(n.Name) {

@@ -103,7 +103,7 @@ same script.
 ## 4. Check it works
 
 ```sh
-capsule version                    # capsule 0.2.0
+capsule version                    # capsule 0.3.0
 sudo capsule host                  # prints this host's id and signing key id
 ```
 
@@ -176,6 +176,15 @@ can close the host's SSH port; keep console access for emergencies.
 **A fleet that looks after itself.** The same timer makes a host follow a
 tissue (guide, section 9): a signed list of what must be alive, which the
 hosts keep true between them. Nothing more needs installing.
+
+**A fleet on the mesh.** Capsules a tissue starts are run without flags, so
+tell each host once where its tunnels can be reached, and share one folder of
+cards between the hosts:
+
+```sh
+echo 10.0.0.5 | sudo tee /etc/capsule/advertise     # this host's address
+# /etc/capsule/peers.d: a folder every host can read and write, such as a shared mount
+```
 
 **Latency-critical capsules.** To let capsules have cores of their own, name
 the cores this host keeps for them in `/etc/capsule/latency`:

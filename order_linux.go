@@ -127,11 +127,13 @@ func cellUnit(name string) string {
 	return "capsule-cell-" + name + "-" + idHex(digest([]byte(dataDir())))[:8] + ".service"
 }
 
-func startCapsule(name string) (string, error) { return startCapsuleUnit(name, "", true) }
+func startCapsule(name string) (string, error) { return startCapsuleUnit(name, "", true, "") }
 
 // startCapsuleUnit starts a capsule under systemd and waits for it to be
-// up. With no unit named it picks the usual one for an order.
-func startCapsuleUnit(name, unit string, fetch bool, exactly ...string) (string, error) {
+// up. With no unit named it picks the usual one for an order. exactly names
+// the release to fetch, if not the current one; runArgs are further flags
+// for `capsule run`.
+func startCapsuleUnit(name, unit string, fetch bool, exactly string, runArgs ...string) (string, error) {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return "", errors.New("run orders need systemd on the host, to keep the capsule running after the order is done")
 	}
@@ -147,7 +149,7 @@ func startCapsuleUnit(name, unit string, fetch bool, exactly ...string) (string,
 	if _, _, err := blobs(); err == nil && fetch {
 		// Pick up the current release first. A host that already has the
 		// capsule can still start it while the ledger is out of reach.
-		if note, err = fetchRelease(name, "", trusted, exactly...); err != nil {
+		if note, err = fetchRelease(name, "", trusted, exactly); err != nil {
 			if _, serr := readSeal(dir); serr != nil {
 				return "", err
 			}
@@ -186,7 +188,7 @@ func startCapsuleUnit(name, unit string, fetch bool, exactly ...string) (string,
 				args = append(args, "--setenv", v+"="+os.Getenv(v))
 			}
 		}
-		args = append(args, "--", self, "run", dir)
+		args = append(append(append(args, "--", self, "run"), runArgs...), dir)
 		for attempt := 0; ; attempt++ {
 			out, err := exec.Command("systemd-run", args...).CombinedOutput()
 			if err == nil {

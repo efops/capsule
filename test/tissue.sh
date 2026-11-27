@@ -57,7 +57,7 @@ release spare "$SLEEP"
 release cache "$SLEEP"
 
 count() { n=0; for h in a b c; do n=$((n + $(on $h ps 2>/dev/null | grep -c "^$1-" || true))); done; echo $n; }
-where() { for h in a b c; do on $h ps 2>/dev/null | grep -q "^$1-" && printf '%s ' $h; done; }
+where() { for h in a b c; do on $h ps 2>/dev/null | grep -q "^$1-" && printf '%s ' $h; done; true; }
 tend() { for h in "$@"; do on $h tend 2>>tend.log & done; wait; } # each host on its own, as their timers would
 # settle <hosts> until <condition>: let the hosts make their passes until it holds
 until_true() { hosts=$1; shift; for i in $(seq 1 30); do tend $hosts; if "$@"; then return 0; fi; sleep 1; done; return 1; }

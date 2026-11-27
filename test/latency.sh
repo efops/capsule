@@ -76,4 +76,12 @@ pass "while the capsule runs, the host no longer has the interface"
 "$CAPSULE" kill "$("$CAPSULE" ps | grep '^fast-' | cut -d' ' -f1)"; wait || true
 capsule fast 'echo hi' ',"latency":{"nic":{"name":"nosuch0"}}'
 run fast | grep -q 'no network interface nosuch0' && pass "asking for an interface the host does not have is refused" || fail "missing nic: $(run fast)"
+if [ -c /dev/net/tun ]; then
+  capsule fast 'grep -c /dev/net/tun /proc/self/mountinfo' ',"latency":{"devices":["/dev/net/tun"]}'
+  [ "$(run fast)" = 1 ] && pass "a device file the manifest names is there for the capsule to open" || fail "device: $(run fast)"
+  capsule plain 'grep -c /dev/net/tun /proc/self/mountinfo'
+  [ "$(run plain)" = 0 ] && pass "an ordinary capsule has no such device" || fail "an ordinary capsule has the device"
+fi
+capsule fast 'echo hi' ',"latency":{"devices":["/dev/nosuchdevice0"]}'
+run fast | grep -q 'not a device on this host' && pass "a device the host does not have is refused" || fail "missing device: $(run fast)"
 echo "all latency checks passed"

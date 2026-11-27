@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,6 +111,11 @@ func cmdTend(args []string) error {
 			}
 			keep[s.Cell] = true
 			p.note("took %s slot %d (term %d) by the draw of round %d", s.Cell, s.Slot, s.Term, s.Round)
+			if err := p.bringData(w, s); err != nil {
+				p.note("could not bring the data of %s here, so not starting it: %v", s.Cell, err)
+				continue
+			}
+			p.tell(w, s, "holder")
 			if err := p.ensure(s.Cell, info.Seal); err != nil {
 				p.note("could not start %s: %v", s.Cell, err)
 				continue
@@ -120,6 +126,7 @@ func cmdTend(args []string) error {
 			}
 		case "hold":
 			keep[s.Cell] = true
+			p.tell(w, s, "holder")
 			if err := p.ensure(s.Cell, ""); err != nil {
 				p.note("could not start %s: %v", s.Cell, err)
 				continue // no pulse: if this goes on, the lease lapses and another host takes over
@@ -133,8 +140,40 @@ func cmdTend(args []string) error {
 			}
 		case "shadow":
 			keep[s.Cell] = true
+			p.tell(w, s, "standby")
 			if err := p.ensure(s.Cell, info.Seal); err != nil {
 				p.note("could not run %s as a standby: %v", s.Cell, err)
+			}
+		case "leave":
+			// This host is being emptied. Stop the cell, send its data on, and give the slot up.
+			h := p.held[s.Cell]
+			if _, err := stopCapsule(s.Cell); err != nil {
+				keep[s.Cell] = true
+				p.note("could not stop %s to hand it over: %v", s.Cell, err)
+				continue
+			}
+			if c := p.t.cell(s.Cell); c.interval() > 0 && len(info.Manifest.Volumes) > 0 {
+				if err := p.ship(s.Cell, s.Slot, ""); err != nil {
+					// Its data could not be sent on, so it stays, and keeps running here.
+					keep[s.Cell] = true
+					p.note("could not ship the data of %s, so it stays on this host: %v", s.Cell, err)
+					p.ensure(s.Cell, "")
+					p.pulse(w, s)
+					continue
+				}
+			}
+			h.Ships = false // shipped just now; nothing more to send when it is cleared away below
+			p.held[s.Cell] = h
+			p.put(pulseKey(s.Cell, s.Slot), beat{Kind: "pulse", Cell: s.Cell, Slot: s.Slot, Term: s.Term, Left: true})
+			p.note("handed %s over: this host is being drained", s.Cell)
+			appendLog(logEntry{Event: "tissue", Capsule: s.Cell, Detail: "handed over: this host is being drained"})
+		case "ship":
+			prev := ""
+			if rec := w.shipped[fmt.Sprintf("%s/%d", s.Cell, s.Slot)]; rec != nil {
+				prev = rec.Object
+			}
+			if err := p.ship(s.Cell, s.Slot, prev); err != nil {
+				p.note("could not ship a snapshot of %s: %v", s.Cell, err)
 			}
 		case "want":
 			p.put("tissue/want/"+s.Cell, beat{Kind: "want", Cell: s.Cell, Want: s.Want})
@@ -148,6 +187,168 @@ func cmdTend(args []string) error {
 		}
 	}
 	p.writeHeld()
+	return nil
+}
+
+// state is the directory through which this host tells a cell's supervisor,
+// and the capsule itself, what the tissue says of it.
+func (p *tending) state(cell string) string { return filepath.Join(p.dir, "state", cell) }
+
+// tell records a cell's role here before it is started and on every pass. A
+// standby that has promoted itself keeps that until the tissue either gives
+// it the lease or has heard from the holder since.
+func (p *tending) tell(w *world, s step, role string) {
+	dir := p.state(s.Cell)
+	os.MkdirAll(dir, 0o755)
+	c := p.t.cell(s.Cell)
+	if d, err := time.ParseDuration(c.Detect); err == nil {
+		os.WriteFile(filepath.Join(dir, "detect"), []byte(strconv.FormatInt(d.Milliseconds(), 10)+"\n"), 0o644)
+	} else {
+		os.Remove(filepath.Join(dir, "detect"))
+	}
+	if c.Takeover != "strict" || role != "holder" {
+		os.Remove(filepath.Join(dir, "until"))
+	}
+	file := filepath.Join(dir, "role")
+	now := strings.TrimSpace(readText(file))
+	if now == "holder promoted" && role == "standby" {
+		if info, err := os.Stat(file); err == nil && w.slot(s.Cell, s.Slot).last() <= clockTick(info.ModTime())+1 {
+			return // the holder has not been heard from since: the promotion stands
+		}
+	}
+	if now != role && !(now == "holder promoted" && role == "holder") {
+		writeRole(dir, role)
+	}
+}
+
+func (p *tending) shippedMark(cell string) uint64 {
+	n, _ := strconv.ParseUint(strings.TrimSpace(readText(filepath.Join(p.dir, "shipped-"+cell))), 10, 64)
+	return n
+}
+
+// ship sends a copy of a cell's volumes to the ledger's store, encrypted
+// under a fresh key that is wrapped for every host of the tissue, so that
+// whichever of them takes the cell next can restore it.
+func (p *tending) ship(cell string, slot int, previous string) error {
+	_, store, err := blobs()
+	if err != nil {
+		return err
+	}
+	snapshot, err := snapshotVolumes(cell, len(instancesNamed(cell)) > 0)
+	if err != nil {
+		return err
+	}
+	defer removeTree(snapshot)
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return err
+	}
+	sealed, err := os.CreateTemp(p.dir, "ship-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(sealed.Name())
+	err = encryptTree(snapshot, sealed, key)
+	if cerr := sealed.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	sum, _, err := fileHash(sealed.Name())
+	if err != nil {
+		return err
+	}
+	b := beat{Kind: "ship", Cell: cell, Slot: slot, Sum: sum, Object: fmt.Sprintf("tissue/snapshots/%s/%03d/%d.enc", cell, slot, p.now)}
+	for _, h := range p.t.Hosts {
+		pub, err := b64.DecodeString(h.Key)
+		if err != nil || len(pub) == 0 {
+			continue
+		}
+		wrap, err := wrapKey(key, pub)
+		if err != nil {
+			return err
+		}
+		b.Wraps = append(b.Wraps, wrap)
+	}
+	if err := store.putFile(b.Object, sealed.Name()); err != nil {
+		return err
+	}
+	if err := p.put(fmt.Sprintf("tissue/shipped/%s/%03d", cell, slot), b); err != nil {
+		return err
+	}
+	os.WriteFile(filepath.Join(p.dir, "shipped-"+cell), []byte(strconv.FormatUint(p.now, 10)+"\n"), 0o600)
+	if remover, ok := p.l.(interface{ remove(string) error }); ok && previous != "" && previous != b.Object {
+		remover.remove(previous)
+	}
+	p.note("shipped a snapshot of %s", cell)
+	return nil
+}
+
+// bringData restores a cell's volumes from the latest snapshot before the
+// cell is started on a host that does not have its newest data.
+func (p *tending) bringData(w *world, s step) error {
+	rec := w.shipped[fmt.Sprintf("%s/%d", s.Cell, s.Slot)]
+	if rec == nil || len(w.infos[s.Cell].Manifest.Volumes) == 0 || p.t.cell(s.Cell).Snapshot == "" {
+		return nil
+	}
+	if rec.Host == p.me && rec.Tick <= p.shippedMark(s.Cell) {
+		return nil // the newest snapshot is this host's own: what is here is at least as new
+	}
+	if len(instancesNamed(s.Cell)) > 0 {
+		return errors.New("it is running here already")
+	}
+	_, store, err := blobs()
+	if err != nil {
+		return err
+	}
+	box, err := hostBoxKey()
+	if err != nil {
+		return err
+	}
+	var key []byte
+	for _, wrap := range rec.Wraps {
+		if wrap.Host == p.me {
+			if key, err = unwrapKey(wrap, box); err != nil {
+				return err
+			}
+		}
+	}
+	if key == nil {
+		return errors.New("the snapshot was not made out to this host")
+	}
+	sealed := filepath.Join(p.dir, "fetch-"+s.Cell)
+	defer os.Remove(sealed)
+	if err := store.getFile(rec.Object, sealed); err != nil {
+		return err
+	}
+	if sum, _, err := fileHash(sealed); err != nil || sum != rec.Sum {
+		return errors.New("the snapshot in the store is not the one its holder signed for")
+	}
+	name := fmt.Sprintf("tissue-%d", rec.Tick)
+	unpacked := filepath.Join(dataDir(), "snapshots", s.Cell, name)
+	removeTree(unpacked)
+	defer removeTree(unpacked)
+	if err := os.MkdirAll(filepath.Dir(unpacked), 0o700); err != nil {
+		return err
+	}
+	f, err := os.Open(sealed)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := decryptTree(f, key, unpacked); err != nil {
+		return fmt.Errorf("opening the snapshot: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir(), "volumes", s.Cell), 0o700); err != nil {
+		return err
+	}
+	if err := restoreVolumes(s.Cell, name); err != nil {
+		return err
+	}
+	os.WriteFile(filepath.Join(p.dir, "shipped-"+s.Cell), []byte(strconv.FormatUint(rec.Tick, 10)+"\n"), 0o600)
+	p.note("restored the data of %s from the snapshot of tick %d", s.Cell, rec.Tick)
+	appendLog(logEntry{Event: "tissue", Capsule: s.Cell, Detail: fmt.Sprintf("restored volumes from the snapshot of tick %d", rec.Tick)})
 	return nil
 }
 
@@ -176,6 +377,8 @@ type heldCell struct {
 	Last   uint64 `json:"last"` // the tick of its last renewal that reached the ledger
 	Lease  uint64 `json:"lease"`
 	Strict bool   `json:"strict"`
+	Slot   int    `json:"slot"`
+	Ships  bool   `json:"ships"` // it keeps data that is shipped for a standby
 }
 
 func readText(path string) string {
@@ -227,7 +430,14 @@ func (p *tending) pulse(w *world, s step) {
 		p.note("could not renew %s: %v", s.Cell, err)
 		return
 	}
-	p.held[s.Cell] = heldCell{Last: p.now, Lease: p.t.lease(), Strict: p.t.cell(s.Cell).Takeover == "strict"}
+	c := p.t.cell(s.Cell)
+	p.held[s.Cell] = heldCell{Last: p.now, Lease: p.t.lease(), Strict: c.Takeover == "strict", Slot: s.Slot,
+		Ships: c.interval() > 0 && len(w.infos[s.Cell].Manifest.Volumes) > 0}
+	if c.Takeover == "strict" {
+		// The supervisor holds the capsule to this: past it, with no renewal, it stops the capsule itself.
+		until := time.Now().Unix() + int64(p.t.lease())*int64(tickPeriod/time.Second) - int64(tickPeriod/time.Second)
+		os.WriteFile(filepath.Join(p.state(s.Cell), "until"), []byte(strconv.FormatInt(until, 10)+"\n"), 0o644)
+	}
 }
 
 func (p *tending) app(cell string) string { return filepath.Join(dataDir(), "apps", cell) }
@@ -244,7 +454,8 @@ func (p *tending) ensure(cell, seal string) error {
 			seal = p.infoSeal(cell) // nothing here to start
 		}
 	}
-	_, err := startCapsuleUnit(cell, cellUnit(cell), seal != "", seal)
+	os.MkdirAll(p.state(cell), 0o755)
+	_, err := startCapsuleUnit(cell, cellUnit(cell), seal != "", seal, "-tissue", p.state(cell))
 	if err != nil {
 		systemctl("stop", cellUnit(cell)) // do not leave systemd retrying what the next pass will decide afresh
 		return err
@@ -273,12 +484,12 @@ func (p *tending) renew(w *world, s step, info cellInfo) {
 	removeTree(prev)
 	if err := os.Rename(app, prev); err != nil {
 		p.note("could not set the running release of %s aside: %v", s.Cell, err)
-		startCapsuleUnit(s.Cell, cellUnit(s.Cell), false)
+		startCapsuleUnit(s.Cell, cellUnit(s.Cell), false, "", "-tissue", p.state(s.Cell))
 		return
 	}
 	err := os.Rename(next, app)
 	if err == nil {
-		_, err = startCapsuleUnit(s.Cell, cellUnit(s.Cell), false)
+		_, err = startCapsuleUnit(s.Cell, cellUnit(s.Cell), false, "", "-tissue", p.state(s.Cell))
 	}
 	if err == nil {
 		removeTree(prev)
@@ -294,7 +505,7 @@ func (p *tending) renew(w *world, s step, info cellInfo) {
 	raw, _ := json.Marshal(p.sign(beat{Kind: "halt", Cell: s.Cell, Seal: info.Seal}))
 	p.l.create("tissue/halt/"+s.Cell+"/"+idHex(info.Seal), raw)
 	appendLog(logEntry{Event: "tissue", Capsule: s.Cell, Seal: info.Seal, Detail: "the new release did not come up; held back for the whole tissue: " + err.Error()})
-	if _, err := startCapsuleUnit(s.Cell, cellUnit(s.Cell), false); err != nil {
+	if _, err := startCapsuleUnit(s.Cell, cellUnit(s.Cell), false, "", "-tissue", p.state(s.Cell)); err != nil {
 		p.note("could not restart the previous release of %s: %v", s.Cell, err)
 	}
 }
@@ -348,6 +559,12 @@ func (p *tending) stopAllBut(keep map[string]bool) {
 			continue
 		}
 		p.manage(cell, false)
+		if h, was := p.held[cell]; was && h.Ships && p.l != nil {
+			// Stopped, so the copy is exact: whoever takes the cell next starts from here.
+			if err := p.ship(cell, h.Slot, ""); err != nil {
+				p.note("could not ship a last snapshot of %s: %v", cell, err)
+			}
+		}
 		p.note("stopped %s: this host no longer holds it", cell)
 		appendLog(logEntry{Event: "tissue", Capsule: cell, Detail: "stopped: this host no longer holds it"})
 	}

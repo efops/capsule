@@ -700,10 +700,13 @@ term than its own stops its copy.
 | `min`, `max` | Instances, each on its own host. It grows towards `max` while every instance is busy and shrinks back when all are idle. A cell you do not list gets exactly one |
 | `on` | Labels a host must carry |
 | `standby` | `warm`: the runner-up keeps the capsule fetched and checked, and starts it the moment the lease lapses. `hot`: it runs there too |
+| `detect` | With a hot standby on the mesh: the silence after which the standby takes over by itself, such as `"50ms"` |
+| `snapshot` | For a cell with volumes: how often a copy of them is sent on, such as `"5m"`, so that the cell can come back on another host |
 | `takeover` | `fast` (default): keep running if the ledger is out of reach. `strict`: stop as the lease runs out, so there are never two |
 | `step` | Instances replaced at a time when you publish a new release (default 1) |
 | `lease` (top level) | Ticks a renewal lasts. Default 10, half a minute |
 | `budget` (top level) | `memory` and `cpus` the whole tissue may commit |
+| hosts: `drain` | Empty this host: it takes nothing new and hands over what it holds. Do this before taking a host out of the tissue |
 | hosts: `weight`, `memory`, `cpus` | Its share of draws, and what it offers. A host is never given more than it offers, worked out from the leases it holds and each capsule's sealed limits, not from what the host reports |
 
 **New releases roll out by themselves.** `capsule publish` a new version and
@@ -711,11 +714,32 @@ the instances are replaced a few at a time, in an order the beacon picks. If
 a replaced instance does not stay up, the previous release is put back, and
 that release is held back on every host until you publish another.
 
+**Cells that must not be missed.** Give the cell a hot standby and a
+`detect` time. The two copies then watch each other directly, over the mesh,
+every few milliseconds. When the standby stops hearing the holder it takes
+over at once, without waiting for the ledger or a timer: in our tests about
+110 ms after the holder fell silent, with `"detect": "100ms"` (nearer 280 ms
+on a slow, emulated machine). A program
+finds out which it is by reading `/run/capsule/role`: `holder`, `standby`,
+or `holder promoted` when it has just stepped up. If the holder was only
+slow and comes back, the tissue makes the standby a standby again, so for a
+moment both may believe they are the holder; mark the cell
+`"takeover": "strict"` if that must never happen and you would rather wait.
+
+**Cells that keep data.** A cell with volumes stays on the host that has its
+data, unless you give it `"snapshot": "5m"`. Its holder then sends an
+encrypted copy of the volumes to the ledger's store that often, and a host
+that takes the cell over restores the latest copy before starting it.
+
+- When a host is **drained**, the cell is stopped, a last copy is sent, and the next host starts from exactly where it left off: nothing is lost.
+- When a host **dies**, the next one starts from the last copy: at most one interval is lost.
+- A copy can only be taken while the cell runs if the volume has a `size` (which needs root or the helper); a plain volume is copied only when the cell is stopped, which a drain does.
+
 **What to expect.**
 
 - A host acts when its timer fires, every 5 seconds. Placement takes a few seconds; taking over from a dead host takes one lease plus one pass (about 35 seconds by default, 12 to 15 with `"lease": 4`).
 - For no gap at all, run two or more instances, or a `hot` standby: the mesh already sends callers only to instances that answer.
-- A cell with volumes only comes back on the host that has its data.
+- A cell with volumes and no `snapshot` only comes back on the host that has its data.
 - The tissue file needs an operator's signature, like an order; `/etc/capsule/orders` can require several with a `tissue 2` line.
 
 ## 10. Building from a file
@@ -870,7 +894,7 @@ it all come from that file.
 | `scale` | `min`, `max`, `cpu`, `memory_max`, `cooldown`, `restart`, `balance`, `fleet` |
 | `unlock` | Environment variables that switch on at a set time: `at` and `env` |
 | `syscalls` | A list that narrows which kernel calls are allowed |
-| `latency` | For programs where microseconds matter: `cores`, `memory_lock`, `hugepages`, `nic` (see below) |
+| `latency` | For programs where microseconds matter: `cores`, `memory_lock`, `hugepages`, `nic`, `devices` (see below) |
 
 An unknown field is an error, so a typo cannot silently turn a setting off.
 
@@ -882,7 +906,8 @@ capsule can step out of its way once it has started. All of it needs root.
   "cores": 2,
   "memory_lock": true,
   "hugepages": true,
-  "nic": {"name": "eth1", "address": "10.0.0.5/24", "gateway": "10.0.0.1"}
+  "nic": {"name": "eth1", "address": "10.0.0.5/24", "gateway": "10.0.0.1"},
+  "devices": ["/dev/vfio/vfio"]
 }
 ```
 
@@ -892,13 +917,15 @@ capsule can step out of its way once it has started. All of it needs root.
 | `memory_lock` | The right to lock all its memory in RAM (`mlockall`) |
 | `hugepages` | The host's huge pages, at `/dev/hugepages` |
 | `nic` | One of the host's network interfaces, moved into the capsule and set up there. The host does not have it while the capsule runs |
+| `devices` | Device files of the host, there for the capsule to open with the host's own permissions on them. This is what a network stack that bypasses the kernel needs, together with huge pages and locked memory |
 
 In a tissue, such a cell is only placed on hosts that list the cores and the
 interface: `{"file": "fast-1.host", "cores": 6, "nics": ["eth1"]}`.
 
 This is about removing what would slow a program down, and it is tested for
-being applied, not for speed: real numbers need your own hardware. Stacks
-that bypass the kernel entirely (DPDK, OpenOnload) are not supported yet.
+being applied, not for speed: real numbers need your own hardware. The
+pieces a kernel-bypass stack (DPDK, OpenOnload) asks for are all here, but no
+such stack has been run in a capsule by us.
 
 ## 14. Commands
 
@@ -1011,8 +1038,8 @@ add `scale.memory_max`.
 - **Orders do not maintain the host itself.** There is no remote shell on a host, by design; operating system updates need their own mechanism. `exec` runs one command inside a capsule, not an interactive terminal.
 - **Some cell traffic passes through capsule's own process:** socket files, programs that listen on IPv4 only, and offers with a grant or `proxy_protocol`. Port-to-port traffic otherwise goes straight through the kernel.
 - **Autoscaling goes by CPU and memory**, not by request rate or queue length.
-- **A tissue is not instant.** Hosts act on a timer, so placement takes seconds and taking over from a dead host takes about a lease. Use several instances or a hot standby where a gap matters.
-- **A cell with data stays on its host.** The tissue does not move volumes.
+- **A tissue is not instant, except where you ask.** Hosts act on a timer, so placement takes seconds and taking over from a dead host takes about a lease. A hot standby with `detect` takes over in milliseconds.
+- **Data follows by snapshot, not by replication.** A cell that keeps data and dies loses what it wrote since its last snapshot.
 - **`expires` trusts the host's clock.** `not_before` can be made tamper-proof with `timelock`; `expires` cannot.
 - **Time locks are not post-quantum.** Seals, approvals, encrypted capsules and, with `kem` keys on the cards, mesh and cell traffic are.
 
