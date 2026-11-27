@@ -55,18 +55,25 @@ type tissueCell struct {
 	Standby  string   `json:"standby,omitempty"`  // "warm": the runner-up keeps it ready; "hot": it runs there too
 	Takeover string   `json:"takeover,omitempty"` // "fast" (default) or "strict": stop rather than risk two copies
 	Step     int      `json:"step,omitempty"`     // instances replaced at a time when a new release appears (default 1)
+	Snapshot string   `json:"snapshot,omitempty"` // a cell with volumes ships a copy of them this often, e.g. "5m", so that it can come back elsewhere
+	Detect   string   `json:"detect,omitempty"`   // hot standby: the silence after which it takes over by itself, e.g. "50ms"
 }
 
 type tissueHost struct {
 	File    string   `json:"file,omitempty"` // as written by the operator: a host file, resolved when signing
 	ID      string   `json:"id,omitempty"`
 	SignKey string   `json:"sign_key,omitempty"`
+	Key     string   `json:"key,omitempty"` // its encryption key: what a snapshot's key is wrapped for
 	Labels  []string `json:"labels,omitempty"`
 	Weight  int      `json:"weight,omitempty"` // share of draws it wins (default 1)
 	Memory  string   `json:"memory,omitempty"` // what it offers the tissue; empty is no limit
 	CPUs    float64  `json:"cpus,omitempty"`
 	Cores   int      `json:"cores,omitempty"` // dedicated cores it offers latency-critical cells
 	Nics    []string `json:"nics,omitempty"`  // network interfaces it can hand to one
+	// Drain empties the host: it takes nothing new and hands over what it
+	// holds, shipping a last snapshot of any data first. Do this before
+	// taking a host out of the tissue.
+	Drain bool `json:"drain,omitempty"`
 }
 
 type tissue struct {
@@ -131,6 +138,16 @@ func (t tissue) validate() error {
 		case !slices.Contains([]string{"", "fast", "strict"}, c.Takeover):
 			return fmt.Errorf(`tissue: %s: takeover must be "fast" or "strict"`, name)
 		}
+		if c.Snapshot != "" {
+			if d, err := time.ParseDuration(c.Snapshot); err != nil || d < 30*time.Second || c.Standby == "hot" {
+				return fmt.Errorf("tissue: %s: snapshot must be a span of at least 30s, and not with a hot standby, whose own data would differ", name)
+			}
+		}
+		if c.Detect != "" {
+			if d, err := time.ParseDuration(c.Detect); err != nil || d < 10*time.Millisecond || d > 10*time.Second || c.Standby != "hot" {
+				return fmt.Errorf(`tissue: %s: detect must be between 10ms and 10s, and needs standby "hot"`, name)
+			}
+		}
 		if c.Root {
 			roots++
 		}
@@ -143,6 +160,9 @@ func (t tissue) validate() error {
 	}
 	seen := map[string]bool{}
 	for _, h := range t.Hosts {
+		if pub, err := b64.DecodeString(h.Key); h.Key != "" && (err != nil || hostKeyID(pub) != h.ID) {
+			return errors.New("tissue: a host's encryption key is not its own")
+		}
 		if !isID(h.ID) || keyID(h.SignKey) == "" || seen[h.ID] || h.Weight < 0 || h.CPUs < 0 || h.Cores < 0 {
 			return errors.New("tissue: a host is listed twice or is not from a host file")
 		}
@@ -167,19 +187,24 @@ func (t tissue) validate() error {
 // slot, that it still holds one, how many instances a cell should have, or
 // that a release failed to come up.
 type beat struct {
-	Kind      string `json:"kind"` // host, lease, pulse, want, halt
-	Cell      string `json:"cell,omitempty"`
-	Slot      int    `json:"slot,omitempty"`
-	Term      int    `json:"term,omitempty"`
-	Host      string `json:"host"`
-	Tick      uint64 `json:"tick"`
-	Round     uint64 `json:"round,omitempty"`  // lease: the beacon round its draw used
-	Proven    bool   `json:"proven,omitempty"` // lease: that round came signed from the beacon
-	Seal      string `json:"seal,omitempty"`   // the release this instance runs
-	Busy      int    `json:"busy,omitempty"`   // pulse: CPU in use, as a percentage of its limit
-	Want      int    `json:"want,omitempty"`
-	Key       string `json:"key"`
-	Signature string `json:"signature,omitempty"`
+	Kind   string `json:"kind"` // host, lease, pulse, want, halt, ship
+	Cell   string `json:"cell,omitempty"`
+	Slot   int    `json:"slot,omitempty"`
+	Term   int    `json:"term,omitempty"`
+	Host   string `json:"host"`
+	Tick   uint64 `json:"tick"`
+	Round  uint64 `json:"round,omitempty"`  // lease: the beacon round its draw used
+	Proven bool   `json:"proven,omitempty"` // lease: that round came signed from the beacon
+	Seal   string `json:"seal,omitempty"`   // the release this instance runs
+	Busy   int    `json:"busy,omitempty"`   // pulse: CPU in use, as a percentage of its limit
+	Want   int    `json:"want,omitempty"`
+	Left   bool   `json:"left,omitempty"` // pulse: the holder has stopped the cell and gives the slot up
+	// ship: where a snapshot of the cell's volumes is, its hash, and its key wrapped for each host.
+	Object    string      `json:"object,omitempty"`
+	Sum       string      `json:"sum,omitempty"`
+	Wraps     []recipient `json:"wraps,omitempty"`
+	Key       string      `json:"key"`
+	Signature string      `json:"signature,omitempty"`
 }
 
 func (b beat) message() []byte {
@@ -227,16 +252,17 @@ func (s slotState) last() uint64 {
 }
 
 type world struct {
-	t      tissue
-	now    uint64
-	infos  map[string]cellInfo
-	alive  map[string]bool        // hosts that have pulsed within a lease
-	slots  map[string][]slotState // by cell, then slot
-	want   map[string]int         // instances asked for beyond the minimum, by cell
-	wantAt map[string]uint64
-	halted map[string]bool                              // cell + " " + seal: a release that failed to come up
-	beacon func(round uint64) (sig []byte, proven bool) // the draw's source of randomness
-	taking map[string][]string                          // while planning: cells a host is about to claim, by host
+	t       tissue
+	now     uint64
+	infos   map[string]cellInfo
+	alive   map[string]bool        // hosts that have pulsed within a lease
+	slots   map[string][]slotState // by cell, then slot
+	want    map[string]int         // instances asked for beyond the minimum, by cell
+	wantAt  map[string]uint64
+	halted  map[string]bool                              // cell + " " + seal: a release that failed to come up
+	beacon  func(round uint64) (sig []byte, proven bool) // the draw's source of randomness
+	taking  map[string][]string                          // while planning: cells a host is about to claim, by host
+	shipped map[string]*beat                             // the latest snapshot of a slot's volumes, by "cell/slot"
 }
 
 func (w *world) slot(cell string, i int) slotState {
@@ -247,6 +273,9 @@ func (w *world) slot(cell string, i int) slotState {
 }
 
 func (w *world) held(s slotState) bool {
+	if s.pulse != nil && s.pulse.Left {
+		return false // given up: free at once, with no lease to wait out
+	}
 	return s.lease != nil && s.last()+w.t.lease() >= w.now
 }
 
@@ -375,7 +404,7 @@ func (w *world) holds(host, cell string) bool {
 
 // eligible reports whether a host could take one more instance of a cell.
 func (w *world) eligible(h tissueHost, cell string) bool {
-	if !w.alive[h.ID] || w.holds(h.ID, cell) { // one instance of a cell per host
+	if !w.alive[h.ID] || h.Drain || w.holds(h.ID, cell) { // one instance of a cell per host
 		return false
 	}
 	for _, label := range w.t.cell(cell).On {
@@ -463,16 +492,34 @@ func (w *world) understudy(cell string, slot int) string {
 
 // pinned reports whether a slot must stay where it is: a cell that keeps
 // data on a host can only come back on that host.
-func (w *world) pinned(cell string, slot int) string {
-	if s := w.slot(cell, slot); s.lease != nil && len(w.infos[cell].Manifest.Volumes) > 0 {
-		return s.lease.Host
+//
+// Unless its data can follow it: with a snapshot shipped, any host the
+// snapshot's key was wrapped for can restore it and carry on.
+func (w *world) pinned(cell string, slot int, me string) string {
+	s := w.slot(cell, slot)
+	if s.lease == nil || len(w.infos[cell].Manifest.Volumes) == 0 {
+		return ""
 	}
-	return ""
+	if rec := w.shipped[fmt.Sprintf("%s/%d", cell, slot)]; rec != nil && w.t.cell(cell).Snapshot != "" {
+		if me == s.lease.Host || slices.ContainsFunc(rec.Wraps, func(r recipient) bool { return r.Host == me }) {
+			return ""
+		}
+	}
+	return s.lease.Host
+}
+
+// interval is how many ticks pass between a cell's snapshots, or 0 if it ships none.
+func (c tissueCell) interval() uint64 {
+	d, err := time.ParseDuration(c.Snapshot)
+	if err != nil {
+		return 0
+	}
+	return uint64(d / tickPeriod)
 }
 
 // step is one thing a host should do after looking at the world.
 type step struct {
-	Do   string // claim, hold, ready, shadow, renew, want
+	Do   string // claim, hold, ready, shadow, renew, want, ship, leave
 	Cell string
 	Slot int
 	Term int
@@ -490,14 +537,23 @@ func (w *world) plan(me string) []step {
 	var steps []step
 	w.taking = map[string][]string{} // what this pass decides to claim counts against what it may claim next
 	counts, _ := w.wanted()
+	mine, _ := w.t.host(me)
+	draining := mine.Drain
 	for _, cell := range slices.Sorted(maps.Keys(counts)) {
 		c, info := w.t.cell(cell), w.infos[cell]
 		for i := 0; i < counts[cell]; i++ {
 			s := w.slot(cell, i)
 			if w.held(s) {
 				switch {
+				case s.lease.Host == me && draining:
+					steps = append(steps, step{Do: "leave", Cell: cell, Slot: i, Term: s.lease.Term})
 				case s.lease.Host == me:
 					steps = append(steps, step{Do: "hold", Cell: cell, Slot: i, Term: s.lease.Term})
+					if every := c.interval(); every > 0 && len(info.Manifest.Volumes) > 0 {
+						if rec := w.shipped[fmt.Sprintf("%s/%d", cell, i)]; rec == nil || rec.Host != me || rec.Tick+every <= w.now {
+							steps = append(steps, step{Do: "ship", Cell: cell, Slot: i, Term: s.lease.Term})
+						}
+					}
 					if w.due(cell, i, counts[cell], info) {
 						steps = append(steps, step{Do: "renew", Cell: cell, Slot: i, Term: s.lease.Term})
 					}
@@ -506,7 +562,7 @@ func (w *world) plan(me string) []step {
 				}
 				continue
 			}
-			if pin := w.pinned(cell, i); pin != "" && pin != me {
+			if pin := w.pinned(cell, i, me); pin != "" && pin != me {
 				continue
 			}
 			round := drawRound(w.now)
@@ -531,6 +587,9 @@ func (w *world) plan(me string) []step {
 			vacant := round // a slot nobody has held: the others wait from the start of the epoch
 			if s.lease != nil {
 				vacant = s.last() + w.t.lease()
+				if s.pulse != nil && s.pulse.Left {
+					vacant = s.pulse.Tick
+				}
 			}
 			if k == 0 || w.now >= vacant+uint64(k)*tissueStagger {
 				term := s.top + 1
@@ -701,7 +760,7 @@ func readTissue(l ledger, rules *orderRules) (tissue, bool, error) {
 // can hide a fact but cannot invent one.
 func readWorld(l ledger, t tissue, now uint64, trusted trustSet) (*world, error) {
 	w := &world{t: t, now: now, infos: map[string]cellInfo{}, alive: map[string]bool{}, slots: map[string][]slotState{},
-		want: map[string]int{}, wantAt: map[string]uint64{}, halted: map[string]bool{}}
+		want: map[string]int{}, wantAt: map[string]uint64{}, halted: map[string]bool{}, shipped: map[string]*beat{}}
 	rounds := map[uint64][]byte{}
 	proven := map[uint64]bool{}
 	w.beacon = func(round uint64) ([]byte, bool) {
@@ -736,6 +795,10 @@ func readWorld(l ledger, t tissue, now uint64, trusted trustSet) (*world, error)
 		case len(parts) == 2 && parts[0] == "want":
 			if b := read(key, "want"); b != nil && b.Cell == parts[1] {
 				wants = append(wants, b)
+			}
+		case len(parts) == 3 && parts[0] == "shipped":
+			if b := read(key, "ship"); b != nil && b.Cell == parts[1] && fmt.Sprintf("%03d", b.Slot) == parts[2] {
+				w.shipped[fmt.Sprintf("%s/%d", b.Cell, b.Slot)] = b
 			}
 		case len(parts) == 3 && parts[0] == "halt":
 			if b := read(key, "halt"); b != nil && b.Cell == parts[1] && idHex(b.Seal) == parts[2] {
@@ -922,7 +985,7 @@ func signTissue(keyPath, in, out string, fresh bool) error {
 			if err != nil {
 				return err
 			}
-			t.Hosts[i].File, t.Hosts[i].ID, t.Hosts[i].SignKey = "", cards[0].ID, cards[0].SignKey
+			t.Hosts[i].File, t.Hosts[i].ID, t.Hosts[i].SignKey, t.Hosts[i].Key = "", cards[0].ID, cards[0].SignKey, cards[0].Key
 		}
 		t.Time, t.Signatures = time.Now().UnixNano(), nil
 	}
@@ -1015,6 +1078,8 @@ func tissueStatus() error {
 		state := "alive"
 		if !w.alive[h.ID] {
 			state = "silent"
+		} else if h.Drain {
+			state = "drain"
 		}
 		mem, cpus, _, leases := w.committed(h.ID)
 		fmt.Printf("%-10s %-6s %-9d %-10s %s\n", short8(h.ID), state, leases, fmt.Sprintf("%dM/%.1f", mem>>20, cpus), strings.Join(h.Labels, ","))
@@ -1031,6 +1096,9 @@ func tissueStatus() error {
 			state, running := "alive", s.lease.Seal
 			if !w.held(s) {
 				state = "lapsed"
+				if s.pulse != nil && s.pulse.Left {
+					state = "given up"
+				}
 			}
 			if s.pulse != nil {
 				running = s.pulse.Seal

@@ -237,6 +237,25 @@ func buildRoot(spec initSpec) error {
 			return err
 		}
 	}
+	if l := spec.Manifest.Latency; l != nil {
+		for _, d := range l.Devices {
+			// The device file itself, as the host has it: same device, same permissions.
+			var st unix.Stat_t
+			if err := unix.Stat(d, &st); err != nil || (st.Mode&unix.S_IFMT != unix.S_IFCHR && st.Mode&unix.S_IFMT != unix.S_IFBLK) {
+				return fmt.Errorf("latency: %s is not a device on this host", d)
+			}
+			target := dev + strings.TrimPrefix(d, "/dev")
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(target, nil, 0o644); err != nil {
+				return err
+			}
+			if err := mount(d, target, "", unix.MS_BIND, ""); err != nil {
+				return fmt.Errorf("latency: %w", err)
+			}
+		}
+	}
 	if l := spec.Manifest.Latency; l != nil && l.Hugepages {
 		if err := os.Mkdir(dev+"/hugepages", 0o755); err != nil {
 			return err

@@ -473,7 +473,9 @@ capsule tissue status
 What follows from those:
 
 - **Failover.** A host that stops renewing loses its slots after one lease. With `standby: warm` the runner-up of the same draw already has the capsule fetched and verified and goes first; with `standby: hot` it is already running it.
-- **Split brain is a choice per cell.** `takeover: fast` keeps running when the ledger cannot be reached, because nothing can take its slot meanwhile either, but a host cut off alone may overlap with its replacement until it is back. `takeover: strict` stops the cell just before its lease runs out.
+- **Milliseconds where asked.** With `standby: hot` and `detect: "50ms"`, the supervisors of a cell's instances send each other a datagram over the mesh every fifth of that time. A standby that hears nothing for the whole of it promotes itself at once by rewriting `/run/capsule/role`, which the program watches; the lease follows on the next pass. Neither the ledger nor the timer is on that path. Measured on the test machines: 103 to 118 ms from the holder's supervisor freezing to the standby's role changing, with `detect` at 100 ms.
+- **Data follows its cell.** With `snapshot: "5m"`, a holder ships its volumes that often: frozen and copied, encrypted under a fresh key, the key wrapped with the hybrid wrap for every host of the tissue. A host that takes the cell over verifies and restores the latest snapshot first. Draining a host (`"drain": true`) stops the cell, ships a last snapshot and gives the slot up at once, so a planned move loses nothing.
+- **Split brain is a choice per cell.** `takeover: fast` keeps running when the ledger cannot be reached, because nothing can take its slot meanwhile either, but a host cut off alone may overlap with its replacement until it is back. `takeover: strict` stops the cell just before its lease runs out, and it is the capsule's own supervisor that does so, from a deadline each renewal moves forward: it holds even if nothing else on the host is running.
 - **Generations.** A new release is rolled out `step` instances at a time in an order fixed by the beacon round of its publication. An instance must stay up to count; if it does not, the previous release is put back, the host records a signed halt, and every host skips that release.
 - **Load.** Hosts are never asked how busy they are for placement: what a host has committed is the sum of the sealed limits of the leases it holds, compared with what the tissue says it offers. Growth between `min` and `max` follows the instances' own CPU use, one step per epoch, inside the tissue's `budget`.
 - **Trust.** The tissue needs operator signatures (`tissue 2` in `/etc/capsule/orders` for two). Every lease and pulse is signed by its host and checked against the host keys in the tissue, so a writer to the ledger can hide or delay facts but not invent them. A host never goes back to an older tissue.
@@ -491,6 +493,7 @@ of capsule is on the program's path.
 | `memory_lock` | `RLIMIT_MEMLOCK` is lifted, so the program can `mlockall` |
 | `hugepages` | `hugetlbfs` mounted at `/dev/hugepages` |
 | `nic` | A host network interface moved into the capsule's network and configured there; returned when the capsule ends |
+| `devices` | Host device files bound into the capsule's `/dev`, for stacks that bypass the kernel |
 
 A tissue places such a cell only on hosts that offer the cores and the
 interface.
@@ -642,9 +645,10 @@ cell tunnels run in the supervisor (wireguard-go on a tun interface inside
 the capsule's network, which the supervisor owns) because only root may
 create a kernel WireGuard device in the host's network, and that is slower;
 a tissue reacts on a timer (seconds to place, about a lease to take over
-from a dead host) and does not move cells that keep data; the latency
-profile is checked for being applied, not benchmarked, and does not yet
-cover kernel-bypass network stacks;
+from a dead host) except for hot standbys with `detect`; data follows a
+cell by periodic snapshot, not replication, so a crash loses up to one
+interval; the latency profile is checked for being applied, not
+benchmarked, and no kernel-bypass stack has been run in a capsule;
 the helper is root code reachable by a group, small and fixed in what it
 accepts but a boundary to keep reviewed; orders give no interactive terminal
 and no way to maintain the host's operating system; health checks
@@ -687,6 +691,12 @@ out a release, holding back one that does not come up, tissues that are
 forged or replayed, a strict cell cut off from the ledger, and a host
 leaving. `test/latency.sh` checks dedicated cores, memory locking, huge
 pages and an interface handed to a capsule.
+
+`test/takeover.sh` covers what a tissue does for cells that must not be
+missed or that keep data: roles, a hot standby taking over in milliseconds
+when the holder's supervisor is frozen, a strict cell stopped by its own
+supervisor with nothing else running, data restored on another host after a
+drain and after a crash, and the snapshot being unreadable in the ledger.
 
 `test/order.sh` covers orders, as root and without: every action, the
 signatures an action needs, exec's confinement inside the capsule, sealed

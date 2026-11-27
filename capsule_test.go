@@ -1202,7 +1202,7 @@ func TestOrderResultSealed(t *testing.T) {
 func testWorld(t *testing.T, n int, cells map[string]tissueCell, manifests map[string]Manifest) *world {
 	t.Helper()
 	w := &world{now: 1000, infos: map[string]cellInfo{}, alive: map[string]bool{}, slots: map[string][]slotState{},
-		want: map[string]int{}, wantAt: map[string]uint64{}, halted: map[string]bool{}}
+		want: map[string]int{}, wantAt: map[string]uint64{}, halted: map[string]bool{}, shipped: map[string]*beat{}}
 	w.beacon = func(round uint64) ([]byte, bool) { return fallbackBeacon(round), true }
 	w.t = tissue{Name: "test", Time: 1, Cells: cells}
 	for i := 0; i < n; i++ {
@@ -1651,5 +1651,77 @@ func TestTissueTermsSkipLeasesThatNoLongerCount(t *testing.T) {
 	}
 	if len(terms) != 1 || !terms[4] {
 		t.Errorf("the next claim must take term 4, got %v", terms)
+	}
+}
+
+func TestTissueDataFollowsASnapshot(t *testing.T) {
+	withData := map[string]Manifest{"db": {Volumes: []Volume{{Name: "data", Path: "/data"}}}}
+	w := testWorld(t, 3, map[string]tissueCell{"db": {Root: true, Standby: "warm", Snapshot: "1m"}}, withData)
+	settle(w)
+	holder := holders(w, "db")[0]
+	does := func(host, what string) bool {
+		for _, s := range w.plan(host) {
+			if s.Do == what {
+				return true
+			}
+		}
+		return false
+	}
+	if !does(holder, "ship") {
+		t.Fatal("a holder with volumes and a snapshot interval should ship at once when nothing has been shipped")
+	}
+	var other, third string
+	for _, h := range w.t.Hosts {
+		if h.ID != holder {
+			other, third = third, h.ID
+		}
+	}
+	// A snapshot made out to one other host: only that host may take the cell over.
+	w.shipped["db/0"] = &beat{Kind: "ship", Cell: "db", Host: holder, Tick: w.now, Wraps: []recipient{{Host: third}}}
+	if does(holder, "ship") {
+		t.Error("shipped again before the interval was up")
+	}
+	w.now += 20
+	w.slots["db"][0].lease.Tick = w.now // the holder has kept renewing
+	if !does(holder, "ship") {
+		t.Error("did not ship again after the interval")
+	}
+	w.now += w.t.lease() + 2*tissueStagger + 5
+	if !does(third, "claim") {
+		t.Error("the host the snapshot was made out to could not take the cell over")
+	}
+	if does(other, "claim") {
+		t.Error("a host that cannot open the snapshot was allowed to take a cell with data")
+	}
+	// Without a snapshot setting, the cell stays where its data is, snapshot or not.
+	w.t.Cells["db"] = tissueCell{Root: true}
+	if does(third, "claim") {
+		t.Error("a cell with volumes moved though the tissue does not ship its data")
+	}
+	for _, bad := range []tissueCell{
+		{Root: true, Snapshot: "5s"},                 // too often
+		{Root: true, Snapshot: "1m", Standby: "hot"}, // two live copies of the data
+		{Root: true, Detect: "50ms"},                 // nothing to detect without a hot standby
+		{Root: true, Detect: "1ms", Standby: "hot"},  // below what a timer can keep
+	} {
+		tis := tissue{Name: "x", Cells: map[string]tissueCell{"db": bad}, Hosts: w.t.Hosts}
+		for i := range tis.Hosts {
+			tis.Hosts[i].SignKey = strings.Repeat("A", 10)
+		}
+		if tis.validate() == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
+}
+
+func TestLatencyDevices(t *testing.T) {
+	base := `{"name":"feed","command":["/bin/feed"],"latency":{"devices":[%s]}}`
+	if _, err := parseManifest([]byte(fmt.Sprintf(base, `"/dev/vfio/vfio","/dev/net/tun"`))); err != nil {
+		t.Error(err)
+	}
+	for _, bad := range []string{`"/etc/passwd"`, `"/dev/../etc/shadow"`, `"/dev/null"`, `"/dev/fd/3"`, `"dev/x"`} {
+		if _, err := parseManifest([]byte(fmt.Sprintf(base, bad))); err == nil {
+			t.Errorf("accepted device %s", bad)
+		}
 	}
 }

@@ -98,6 +98,7 @@ const cueSchema = `
 		cores?:       int & >0
 		memory_lock?: bool
 		hugepages?:   bool
+		devices?: [...string]
 		nic?: {
 			name:     string
 			address?: string

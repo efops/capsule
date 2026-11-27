@@ -86,6 +86,9 @@ func receptorPort(name string) int {
 // cells that call it. Its label cannot be a receptor's name.
 func controlPort() int { return receptorPort("\x00control") }
 
+// pulsePort is where the supervisors of one cell's instances listen for each other's heartbeat.
+func pulsePort() int { return receptorPort("\x00pulse") }
+
 // cellPeers turns offers and needs into the mesh's terms: who this cell
 // exchanges packets with, and on which receptor ports.
 func cellPeers(m Manifest) []Peer {
