@@ -75,7 +75,10 @@ tend a b
 id=$(on $S ps | grep '^feed-' | cut -d' ' -f1)
 pid=$(head -1 "$(readlink "$W/$S/run/$id.cg")/cgroup.procs")
 [ "$(cat /proc/$pid/root/run/capsule/role 2>/dev/null)" = standby ] && pass "the program can read its role at /run/capsule/role" || fail "role inside the capsule: $(cat /proc/$pid/root/run/capsule/role 2>&1)"
-sleep 3 # let the two supervisors hear each other over their tunnel
+hears() { [ "$(cat "$W/$S/data/tissue/state/feed/heard" 2>/dev/null)" = 1 ]; }
+for i in $(seq 1 60); do hears && break; sleep 0.5; done
+hears || fail "the standby never heard the holder"
+sleep 1
 [ "$(role $S)" = standby ] || fail "the standby promoted itself while the holder was alive: $(role $S)"
 pass "while the holder's heartbeat arrives, the standby stays a standby"
 sup="run -tissue $W/$H/data/tissue/state/feed"

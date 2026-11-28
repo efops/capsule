@@ -24,6 +24,9 @@ import (
 //
 //	role    "holder" or "standby", written by the tissue; "holder promoted"
 //	        when the supervisor steps up by itself
+//	heard   how many other instances of the cell this one hears at the
+//	        moment, written by the supervisor. A standby can only notice
+//	        a holder going silent once it has heard it: 0 means not yet
 //	detect  how long a silence means the other is gone, in milliseconds
 //	until   for a strict cell: the moment its lease can no longer be
 //	        trusted, in Unix seconds. Past it, the supervisor stops the capsule
@@ -61,6 +64,16 @@ func startHeart(ms *mesh, state string, detect time.Duration) error {
 	}
 	var mu sync.Mutex
 	heard := map[string]time.Time{}
+	told := -1
+	tell := func() { // with mu held
+		if len(heard) != told {
+			told = len(heard)
+			os.WriteFile(filepath.Join(state, "heard"), []byte(strconv.Itoa(told)+"\n"), 0o644)
+		}
+	}
+	mu.Lock()
+	tell()
+	mu.Unlock()
 	go func() {
 		buf := make([]byte, 16)
 		for {
@@ -72,6 +85,7 @@ func startHeart(ms *mesh, state string, detect time.Duration) error {
 			if from := src.(*net.UDPAddr); ms.caller(from.IP) == ms.name {
 				mu.Lock()
 				heard[from.IP.String()] = time.Now()
+				tell()
 				mu.Unlock()
 			}
 		}
@@ -82,13 +96,15 @@ func startHeart(ms *mesh, state string, detect time.Duration) error {
 			for _, addr := range ms.instancesOf(ms.name) {
 				conn.WriteTo([]byte{1}, &net.UDPAddr{IP: addr, Port: pulsePort()})
 			}
-			if !strings.HasPrefix(readText(filepath.Join(state, "role")), "standby") {
-				continue
-			}
+			standby := strings.HasPrefix(readText(filepath.Join(state, "role")), "standby")
 			mu.Lock()
 			for addr, last := range heard {
 				if silence := time.Since(last); silence > detect {
 					delete(heard, addr) // step up once for one loss; the tissue takes it from here
+					tell()
+					if !standby {
+						continue
+					}
 					if err := writeRole(state, "holder promoted"); err == nil {
 						fmt.Fprintf(os.Stderr, "capsule: the holder of %s has been silent for %s; this standby has taken over\n", ms.name, silence.Round(time.Millisecond))
 						appendLog(logEntry{Event: "tissue", Capsule: ms.name, Detail: fmt.Sprintf("standby took over after %s of silence from the holder", silence.Round(time.Millisecond))})

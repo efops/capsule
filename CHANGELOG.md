@@ -1,28 +1,36 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 ### Added
 
+- `/run/capsule/heard`: how many other instances of its cell a supervisor hears. A standby can only notice its holder going silent once it has heard it, and this shows when that is so.
 - `test/fleet.sh`: a tissue on three separate machines, driven over SSH (#11).
 
-### Tested
+### Tested on real machines
 
-Run on three 2-CPU servers (Ubuntu 26.04, kernel 7.0, x86-64) on a private network, ledger in a folder shared over NFS:
+Three 2-CPU servers (Ubuntu 26.04, kernel 7.0, x86-64) on a private network, with the ledger first in a folder shared over NFS and then in an S3-compatible object store.
 
 - Every single-host suite passes on that kernel and release, a newer pair than the project had been run on. The latency suite was not run: it needs four cores.
-- One order was answered by all three machines in 9 to 10 seconds, each picking it up on its own timer.
-- A tissue placed two instances on two machines in 7 seconds.
+- The object store passes `capsule ledger check`: create-once held in every race.
+- One order was answered by all three machines in 9 to 11 seconds, each picking it up on its own timer.
+- A tissue placed two instances on two machines in 7 to 12 seconds.
 - A caller on the third machine reached both instances through WireGuard tunnels between the machines.
-- One machine was rebooted: the standby was running its instance 20 seconds later in one run and 112 seconds later in another (see below), and the rebooted machine did not start a third copy.
-- A hot standby on another machine took over after 107 to 117 ms of silence, with `detect` at 100 ms.
-- A drained machine's cell restarted on another machine with the same data 12 seconds later.
+- One machine was rebooted. With the ledger in the object store the standby was running its instance 20 to 26 seconds later, in four runs. The rebooted machine did not start a third copy.
+- A hot standby on another machine took over after 102 to 117 ms of silence, with `detect` at 100 ms.
+- A drained machine's cell restarted on another machine with the same data 12 to 22 seconds later.
 
 ### Found
 
 - **A ledger on NFS needs `noac,lookupcache=none`.** With default caching the hosts did not see each other's orders for up to a minute. `capsule ledger check` cannot detect this, as it runs on one host.
-- **NFS can stall a takeover by its lease time.** In one run the surviving machines' ledger reads hung for about 90 seconds after the third was rebooted, which is NFS version 4 holding the dead client's state. This is the ledger's doing, not the tissue's, and an object store has no such lease; that has not been measured yet.
-- **Tunnels form more slowly when cards are shared over NFS**, because a change made by another host is seen by polling every 2 seconds, not at once. A caller that starts and immediately connects may at first see only some of the instances.
+- **NFS can stall a takeover by its lease time.** In one run with the ledger on NFS, the surviving machines' reads hung for about 90 seconds after the third was rebooted, and the takeover took 112 seconds. That is NFS version 4 holding the dead client's state. It did not happen with the object store.
+- **Tunnels form more slowly when cards are shared over NFS**, because a change made by another host is seen by polling every 2 seconds. A caller that starts and connects at once may at first see only some of the instances.
+- **A standby that has not yet heard its holder does not take over.** One run froze the holder before the two had heard each other, and nothing happened. That is intended, but it was invisible; `/run/capsule/heard` now shows it.
+
+### Known issues and limits
+
+- Cards for the mesh still need a folder the hosts share; they do not travel through the ledger.
+- Everything listed under 0.3.0 still applies.
 
 ## 0.3.0
 

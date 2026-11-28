@@ -729,7 +729,10 @@ over at once, without waiting for the ledger or a timer: in our tests about
 110 ms after the holder fell silent, with `"detect": "100ms"` (nearer 280 ms
 on a slow, emulated machine). A program
 finds out which it is by reading `/run/capsule/role`: `holder`, `standby`,
-or `holder promoted` when it has just stepped up. If the holder was only
+or `holder promoted` when it has just stepped up. Beside it,
+`/run/capsule/heard` says how many other copies this one can hear: a standby
+can only notice the holder going silent once that is 1, which takes a few
+seconds after both have started. If the holder was only
 slow and comes back, the tissue makes the standby a standby again, so for a
 moment both may believe they are the holder; mark the cell
 `"takeover": "strict"` if that must never happen and you would rather wait.
