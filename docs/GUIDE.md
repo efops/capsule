@@ -514,6 +514,14 @@ vault://vault.example:8200/secret/capsule               HashiCorp Vault
 artifactory://acme.jfrog.io/artifactory/capsule-ledger  Artifactory
 ```
 
+**If the ledger is a folder shared over NFS,** mount it on every host with
+`noac,lookupcache=none`. Otherwise each host remembers for up to a minute
+what the folder held, and misses orders and leases the others have just
+written. Two more things to know about NFS: when one host dies, the server
+can make the others wait up to 90 seconds before it lets go of that host's
+files, which delays a takeover by as long; and the server is a single point
+of failure for the ledger. An object store has neither problem.
+
 Put one line in `/etc/capsule/ledger` on each host. Passwords go in
 `/etc/capsule/ledger.env` as `AWS_ACCESS_KEY_ID=...`, `VAULT_TOKEN=...` and so
 on. Everything written to the ledger is signed, so the store is never trusted

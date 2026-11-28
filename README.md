@@ -258,6 +258,13 @@ It races writers for fresh keys and reports whether create-once held, whether
 the read-back resolved every race to one winner, and what `settle` to keep. A
 shared directory, Vault and AWS S3 itself are atomic and need no pause.
 
+The check runs on one host, so it cannot see what a network filesystem hides
+between hosts. A directory shared over NFS must be mounted with
+`noac,lookupcache=none`: with the default caching, a host goes on believing
+for up to a minute that a key another host just created is not there. NFS
+version 4 also holds a dead client's state for its lease time (90 seconds by
+default), which can stall the surviving hosts' reads for that long.
+
 Artifactory has no conditional upload, so it also relies on the read-back
 unless the ledger's credentials are denied the Delete/Overwrite permission on
 the repository, in which case Artifactory refuses a second upload itself. The
@@ -691,6 +698,15 @@ out a release, holding back one that does not come up, tissues that are
 forged or replayed, a strict cell cut off from the ledger, and a host
 leaving. `test/latency.sh` checks dedicated cores, memory locking, huge
 pages and an interface handed to a capsule.
+
+`test/fleet.sh root@host1 root@host2 root@host3` runs a tissue on three
+separate machines over SSH, with the installed timers doing the work: an
+order answered by all three, placement, a caller reaching instances on other
+machines through their tunnels, one machine rebooted and its instance taken
+over, a hot standby on another machine taking over in milliseconds, and a
+drained machine's cell restarting elsewhere with its data. It has been run on
+three 2-CPU servers (Ubuntu 26.04, kernel 7.0) on a private network, with the
+ledger in a folder shared over NFS.
 
 `test/takeover.sh` covers what a tissue does for cells that must not be
 missed or that keep data: roles, a hot standby taking over in milliseconds
