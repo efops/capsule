@@ -706,7 +706,8 @@ machines through their tunnels, one machine rebooted and its instance taken
 over, a hot standby on another machine taking over in milliseconds, and a
 drained machine's cell restarting elsewhere with its data. It has been run on
 three 2-CPU servers (Ubuntu 26.04, kernel 7.0) on a private network, with the
-ledger in a folder shared over NFS.
+ledger in a folder shared over NFS and in an S3-compatible object store. Set
+`LEDGER` and the store's keys in the environment for the second.
 
 `test/takeover.sh` covers what a tissue does for cells that must not be
 missed or that keep data: roles, a hot standby taking over in milliseconds

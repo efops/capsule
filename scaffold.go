@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const version = "0.3.0"
+const version = "0.3.1"
 
 var notNameChar = regexp.MustCompile(`[^a-z0-9-]+`)
 

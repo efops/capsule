@@ -103,7 +103,7 @@ same script.
 ## 4. Check it works
 
 ```sh
-capsule version                    # capsule 0.3.0
+capsule version                    # capsule 0.3.1
 sudo capsule host                  # prints this host's id and signing key id
 ```
 

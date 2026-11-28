@@ -140,7 +140,10 @@ wait_for 120 paired || fail "the holder and its hot standby did not settle: $(co
 set -- $(where fleet-feed)
 if [ "$(role $1)" = holder ]; then HOLDER=$1; STANDBY=$2; else HOLDER=$2; STANDBY=$1; fi
 pass "a holder and a hot standby on two machines, each told its role"
-sleep 5
+hears() { [ "$(R "$(target $STANDBY)" "cat /var/lib/capsule/tissue/state/fleet-feed/heard 2>/dev/null")" = 1 ]; }
+wait_for 60 hears || fail "the standby never heard the holder's heartbeat: the tunnel between them did not come up"
+pass "the standby hears the holder ${WAITED}s after both are up"
+sleep 3
 [ "$(role $STANDBY)" = standby ] || fail "the standby promoted itself while the holder was alive: $(role $STANDBY)"
 pass "over a real network the standby stays a standby while the holder's heartbeat arrives"
 R "$(target $HOLDER)" "pkill -STOP -f 'capsule run -tissue /var/lib/capsule/tissue/state/fleet-feed'"
